@@ -10,6 +10,7 @@ mod autostart;
 mod click_point_picker;
 mod custom_stop_zone_picker;
 mod engine;
+mod global_hotkey;
 mod hotkeys;
 mod icon;
 mod overlay;
@@ -372,6 +373,20 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_persisted_scope::init())
+        // Delivers the toggle via RegisterEventHotKey, which needs no
+        // permission and fires regardless of which app is frontmost.
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| match event.state {
+                    tauri_plugin_global_shortcut::ShortcutState::Pressed => {
+                        crate::hotkeys::handle_hotkey_pressed(app)
+                    }
+                    tauri_plugin_global_shortcut::ShortcutState::Released => {
+                        crate::hotkeys::handle_hotkey_released(app)
+                    }
+                })
+                .build(),
+        )
         .manage(create_clicker_state())
         .setup(move |app| {
             let handle = app.handle().clone();

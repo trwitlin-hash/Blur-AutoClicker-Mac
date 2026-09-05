@@ -63,6 +63,7 @@ pub fn register_hotkey_inner(app: &AppHandle, hotkey: String) -> AppResult<Strin
             .registered_hotkey
             .lock()
             .unwrap_or_else(poisoned_inner) = None;
+        crate::global_hotkey::apply(app, None);
         return Ok(String::new());
     }
 
@@ -71,6 +72,7 @@ pub fn register_hotkey_inner(app: &AppHandle, hotkey: String) -> AppResult<Strin
         .registered_hotkey
         .lock()
         .unwrap_or_else(poisoned_inner) = Some(binding.clone());
+    crate::global_hotkey::apply(app, Some(&binding));
 
     Ok(format_hotkey_binding(&binding))
 }
@@ -465,6 +467,13 @@ pub fn start_hotkey_listener(app: AppHandle) {
                         .lock()
                         .unwrap_or_else(poisoned_inner)
                         .strict_hotkey_modifiers;
+                    // The window-server registration owns the toggle whenever it
+                    // is active; polling for it as well would fire twice.
+                    let binding = if crate::global_hotkey::ACTIVE.load(Ordering::SeqCst) {
+                        None
+                    } else {
+                        binding
+                    };
                     (binding, strict)
                 };
 
