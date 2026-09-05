@@ -43,16 +43,6 @@
       "icons/128x128@2x.png",
       "icons/icon.icns"
     ],
-    "windows": {
-      "webviewInstallMode": {
-        "type": "embedBootstrapper",
-        "silent": true
-      },
-      "nsis": {
-        "compression": "lzma",
-        "installerIcon": "icons/icon-deactivated-dark.ico"
-      }
-    },
     "macOS": {
       "minimumSystemVersion": "12.0",
       "entitlements": "entitlements.plist",

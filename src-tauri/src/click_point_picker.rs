@@ -4,7 +4,6 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::engine::mouse::current_cursor_position;
-#[cfg(target_os = "macos")]
 use crate::engine::mouse::{current_virtual_screen_rect, VirtualScreenRect};
 use crate::ClickerState;
 
@@ -26,12 +25,6 @@ struct PickerRuntime {
     app: Option<AppHandle>,
     last_cursor_emit: Option<Instant>,
     stop_after_right_up: bool,
-    #[cfg(target_os = "windows")]
-    mouse_hook: *mut std::ffi::c_void,
-    #[cfg(target_os = "windows")]
-    keyboard_hook: *mut std::ffi::c_void,
-    #[cfg(target_os = "windows")]
-    thread_id: u32,
 }
 
 static PICKER: OnceLock<Mutex<PickerRuntime>> = OnceLock::new();
@@ -40,279 +33,6 @@ fn picker() -> &'static Mutex<PickerRuntime> {
     PICKER.get_or_init(|| Mutex::new(PickerRuntime::default()))
 }
 
-// ── Windows implementation ────────────────────────────────────────────────────
-
-#[cfg(target_os = "windows")]
-mod platform {
-    use std::ffi::c_void;
-    use std::sync::MutexGuard;
-    use std::time::Instant;
-
-    use tauri::Emitter;
-    use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
-    use windows_sys::Win32::System::Threading::GetCurrentThreadId;
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        GetAsyncKeyState, VK_CONTROL, VK_ESCAPE, VK_SHIFT,
-    };
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, GetMessageW, PostThreadMessageW, SetWindowsHookExW, UnhookWindowsHookEx,
-        HHOOK, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN,
-        WM_MOUSEMOVE, WM_QUIT, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
-    };
-
-    use super::{picker, ClickPointPickedPayload, PickerRuntime, CURSOR_EMIT_INTERVAL};
-    use crate::engine::mouse::current_cursor_position;
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub enum MouseHookDecision {
-        Pass,
-        Swallow,
-        Pick { continue_picking: bool },
-        Delete,
-    }
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub enum KeyboardHookDecision {
-        Pass,
-        Cancel,
-    }
-
-    pub fn classify_mouse_message(
-        message: u32,
-        shift_down: bool,
-        ctrl_down: bool,
-    ) -> MouseHookDecision {
-        match message {
-            WM_RBUTTONDOWN if ctrl_down => MouseHookDecision::Delete,
-            WM_RBUTTONDOWN => MouseHookDecision::Pick {
-                continue_picking: shift_down,
-            },
-            WM_RBUTTONUP | WM_RBUTTONDBLCLK => MouseHookDecision::Swallow,
-            _ => MouseHookDecision::Pass,
-        }
-    }
-
-    pub fn classify_keyboard_message(message: u32, virtual_key: u32) -> KeyboardHookDecision {
-        match (message, virtual_key) {
-            (WM_KEYDOWN | WM_SYSKEYDOWN, key) if key == VK_ESCAPE as u32 => {
-                KeyboardHookDecision::Cancel
-            }
-            _ => KeyboardHookDecision::Pass,
-        }
-    }
-
-    unsafe extern "system" fn mouse_hook_proc(
-        code: i32,
-        w_param: WPARAM,
-        l_param: LPARAM,
-    ) -> LRESULT {
-        if code < 0 {
-            return CallNextHookEx(std::ptr::null_mut(), code, w_param, l_param);
-        }
-
-        let (app, stop_after_right_up) = {
-            let runtime = picker().lock().unwrap();
-            (runtime.app.clone(), runtime.stop_after_right_up)
-        };
-
-        if let Some(app) = app {
-            let msg = w_param as u32;
-            let shift_down = (unsafe { GetAsyncKeyState(VK_SHIFT as i32) } as u16) >> 15 != 0;
-            let ctrl_down = (unsafe { GetAsyncKeyState(VK_CONTROL as i32) } as u16) >> 15 != 0;
-
-            match classify_mouse_message(msg, shift_down, ctrl_down) {
-                MouseHookDecision::Pick { continue_picking } => {
-                    if let Some((x, y)) = current_cursor_position() {
-                        let _ = app.emit(
-                            "click-point-picked",
-                            ClickPointPickedPayload {
-                                x,
-                                y,
-                                continue_picking,
-                            },
-                        );
-                    }
-
-                    if !continue_picking {
-                        let mut runtime = picker().lock().unwrap();
-                        runtime.stop_after_right_up = true;
-                    }
-
-                    return 1; // Swallow the message
-                }
-                MouseHookDecision::Delete => {
-                    if let Some((x, y)) = current_cursor_position() {
-                        let _ = app.emit(
-                            "click-point-delete-requested",
-                            ClickPointPickedPayload {
-                                x,
-                                y,
-                                continue_picking: false,
-                            },
-                        );
-                    }
-                    return 1;
-                }
-                MouseHookDecision::Swallow => {
-                    if stop_after_right_up {
-                        let runtime = picker().lock().unwrap();
-                        if let Some(app) = &runtime.app {
-                            let _ = app.emit("click-pick-ended", ());
-                        }
-                        drop(runtime);
-                        super::cancel_click_point_pick_inner(&app);
-                    } else {
-                        return 1;
-                    }
-                }
-                MouseHookDecision::Pass => {}
-            }
-
-            // Emit cursor position periodically for overlay tracking
-            let now = Instant::now();
-            let mut runtime = picker().lock().unwrap();
-            let should_emit = runtime
-                .last_cursor_emit
-                .map_or(true, |t| now.duration_since(t) >= CURSOR_EMIT_INTERVAL);
-            if should_emit {
-                runtime.last_cursor_emit = Some(now);
-                drop(runtime);
-                if let Some((x, y)) = current_cursor_position() {
-                    if let Some(bounds) = current_virtual_screen_rect() {
-                        let offset = VirtualScreenRect::new(x, y, 1, 1).offset_from(bounds);
-                        let _ = app.emit(
-                            "click-pick-cursor",
-                            serde_json::json!({ "x": offset.left, "y": offset.top }),
-                        );
-                    }
-                }
-            }
-        }
-
-        CallNextHookEx(std::ptr::null_mut(), code, w_param, l_param)
-    }
-
-    unsafe extern "system" fn keyboard_hook_proc(
-        code: i32,
-        w_param: WPARAM,
-        l_param: LPARAM,
-    ) -> LRESULT {
-        if code < 0 {
-            return CallNextHookEx(std::ptr::null_mut(), code, w_param, l_param);
-        }
-
-        let msg = w_param as u32;
-        let kb = &*(l_param as *const KBDLLHOOKSTRUCT);
-
-        if classify_keyboard_message(msg, kb.vkCode) == KeyboardHookDecision::Cancel {
-            let app = picker().lock().unwrap().app.clone();
-            drop(picker());
-            if let Some(app) = app {
-                super::cancel_click_point_pick_inner(&app);
-            }
-            return 1;
-        }
-
-        CallNextHookEx(std::ptr::null_mut(), code, w_param, l_param)
-    }
-
-    pub fn start_hooks(app: &AppHandle) -> Result<(), String> {
-        let (ready_tx, ready_rx) = mpsc::channel();
-        let app = app.clone();
-
-        std::thread::spawn(move || unsafe {
-            let thread_id = GetCurrentThreadId();
-            let mouse_hook =
-                SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook_proc), std::ptr::null_mut(), 0);
-            if mouse_hook.is_null() {
-                let _ = ready_tx.send(Err(String::from("Failed to install mouse hook")));
-                return;
-            }
-
-            let keyboard_hook = SetWindowsHookExW(
-                WH_KEYBOARD_LL,
-                Some(keyboard_hook_proc),
-                std::ptr::null_mut(),
-                0,
-            );
-            if keyboard_hook.is_null() {
-                UnhookWindowsHookEx(mouse_hook);
-                let _ = ready_tx.send(Err(String::from("Failed to install keyboard hook")));
-                return;
-            }
-
-            {
-                let mut runtime = picker().lock().unwrap();
-                runtime.thread_id = thread_id;
-                runtime.mouse_hook = mouse_hook;
-                runtime.keyboard_hook = keyboard_hook;
-            }
-            let _ = ready_tx.send(Ok(()));
-
-            let mut msg = std::mem::zeroed::<MSG>();
-            while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {}
-
-            UnhookWindowsHookEx(mouse_hook);
-            UnhookWindowsHookEx(keyboard_hook);
-            let mut runtime = picker().lock().unwrap();
-            if runtime.mouse_hook == mouse_hook {
-                runtime.mouse_hook = std::ptr::null_mut();
-            }
-            if runtime.keyboard_hook == keyboard_hook {
-                runtime.keyboard_hook = std::ptr::null_mut();
-            }
-            if runtime.mouse_hook.is_null() && runtime.keyboard_hook.is_null() {
-                runtime.thread_id = 0;
-            }
-        });
-
-        match ready_rx.recv_timeout(Duration::from_secs(1)) {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => {
-                super::cancel_click_point_pick_inner(&app);
-                Err(e)
-            }
-            Err(_) => {
-                super::cancel_click_point_pick_inner(&app);
-                Err(String::from("Timed out starting hooks"))
-            }
-        }
-    }
-
-    pub fn stop_hooks(notify_overlay: bool) -> Option<AppHandle> {
-        let (app, thread_id) = {
-            let mut runtime = picker().lock().unwrap();
-            let app = runtime.app.clone();
-            let thread_id = runtime.thread_id;
-            runtime.active = false;
-            runtime.app = None;
-            runtime.last_cursor_emit = None;
-            runtime.stop_after_right_up = false;
-            (app, thread_id)
-        };
-
-        if let Some(app) = &app {
-            app.state::<ClickerState>()
-                .click_point_pick_active
-                .store(false, Ordering::SeqCst);
-            if notify_overlay {
-                let _ = app.emit("click-pick-ended", ());
-            }
-        }
-
-        if thread_id != 0 {
-            unsafe {
-                PostThreadMessageW(thread_id, WM_QUIT, 0, 0);
-            }
-        }
-
-        app
-    }
-}
-
-// ── macOS implementation ──────────────────────────────────────────────────────
-
-#[cfg(target_os = "macos")]
 mod platform {
     use std::ffi::c_void;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -575,7 +295,6 @@ pub fn start_click_point_pick_inner(app: AppHandle) -> Result<(), String> {
 
     crate::overlay::show_click_point_pick_overlay(&app).map_err(|e| e.to_string())?;
 
-    #[cfg(target_os = "macos")]
     {
         platform::start_hooks(&app)?;
 
@@ -612,9 +331,6 @@ pub fn start_click_point_pick_inner(app: AppHandle) -> Result<(), String> {
             }
         });
     }
-
-    #[cfg(target_os = "windows")]
-    platform::start_hooks(&app)?;
 
     Ok(())
 }

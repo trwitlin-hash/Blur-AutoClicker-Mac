@@ -48,8 +48,12 @@ resolved by hand.
 | Stats/settings path | `%APPDATA%` | `~/Library/Application Support/BlurAutoClicker` |
 | Taskbar icon (`HICON`) | `CreateIconIndirect` | not applicable, compiled out |
 
-All Windows code is preserved behind `#[cfg(target_os = "windows")]` rather
-than deleted, so the tree can still target Windows.
+Windows code was initially preserved behind `#[cfg(target_os = "windows")]`, then
+removed outright in a later pass: 98 gated items across 16 files, plus the
+Win32 keyboard/process modules, the WebView2 bootstrapper, NSIS packaging, the
+PowerShell scripts, the MSVC cargo config and the Windows CI jobs. The table
+above is a record of what each mechanism was replaced with, not a description of
+code that is still present.
 
 ## Deliberate differences
 

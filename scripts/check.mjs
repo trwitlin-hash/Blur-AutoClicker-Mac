@@ -98,44 +98,20 @@ function run(c) {
  * @returns {boolean} true if a running instance was detected (and we aborted)
  */
 async function guardRunningInstance() {
-  let running = false;
-  if (process.platform === 'win32') {
-    const r = spawnSync('tasklist', ['/NH'], { encoding: 'utf8', shell: true });
-    const out = r.stdout || '';
-    running = /BlurAutoClicker/i.test(out) || /crashpad_handler/i.test(out);
-  } else {
-    // Match the built app's executable path specifically. A bare
-    // "BlurAutoClicker" pattern also matches this checker itself, because the
-    // repo path contains that string.
-    const r = spawnSync(
-      'pgrep',
-      ['-f', 'BlurAutoClicker\\.app/Contents/MacOS/BlurAutoClicker'],
-      { encoding: 'utf8' },
-    );
-    running = r.status === 0 && !!r.stdout.trim();
-  }
-
-  // crashpad_handler.exe is a Windows-only staged resource, so the file-lock
-  // probe is meaningless elsewhere - and its absence would report a false
-  // positive.
-  if (!running && process.platform === 'win32') {
-    try {
-      const { openSync, closeSync } = await import('node:fs');
-      const { resolve } = await import('node:path');
-      const resource = resolve('src-tauri/resources/crashpad_handler.exe');
-      const fd = openSync(resource, 'r+');
-      closeSync(fd);
-    } catch {
-      running = true;
-    }
-  }
-
-  if (!running) return false;
+  // Match the built app's executable path specifically. A bare
+  // "BlurAutoClicker" pattern also matches this checker itself, because the
+  // repo path contains that string.
+  const r = spawnSync(
+    'pgrep',
+    ['-f', 'BlurAutoClicker\\.app/Contents/MacOS/BlurAutoClicker'],
+    { encoding: 'utf8' },
+  );
+  if (!(r.status === 0 && r.stdout.trim())) return false;
 
   process.stdout.write(
     `\n${C.red('CHECK ABORTED — BlurAutoClicker is currently running.')}\n` +
-      `${C.bold('Close BlurAutoClicker')} (and any ${C.bold('crashpad_handler.exe')} it spawned), then re-run ${C.bold('npm run check')}.\n` +
-      `${C.dim('A running instance locks src-tauri/resources/crashpad_handler.exe, so every cargo step fails with "os error 32: file in use by another process".')}\n`,
+      `${C.bold('Quit BlurAutoClicker')}, then re-run ${C.bold('npm run check')}.\n` +
+      `${C.dim('A running instance holds the build output open, so the cargo steps fail.')}\n`,
   );
   process.exit(1);
 }

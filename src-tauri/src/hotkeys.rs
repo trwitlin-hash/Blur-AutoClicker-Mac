@@ -3,8 +3,6 @@ use crate::engine::worker::now_epoch_ms;
 use crate::engine::worker::start_clicker_inner;
 use crate::engine::worker::stop_clicker_inner;
 use crate::engine::worker::toggle_clicker_inner;
-#[cfg(target_os = "windows")]
-use crate::engine::AUTOCLICKER_EXTRA_INFO;
 use crate::error::poisoned_inner;
 use crate::error::AppError;
 use crate::error::AppResult;
@@ -15,33 +13,10 @@ use std::sync::OnceLock;
 use std::time::Duration;
 use std::time::Instant;
 use tauri::Manager;
-#[cfg(target_os = "windows")]
-use windows_sys::Win32::Foundation::{GetLastError, LRESULT, POINT};
-#[cfg(target_os = "windows")]
-use windows_sys::Win32::System::Threading::GetCurrentProcessId;
-#[cfg(target_os = "windows")]
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
-#[cfg(target_os = "windows")]
-use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, GetAncestor, GetCursorPos, GetWindowThreadProcessId, PeekMessageW,
-    SetWindowsHookExW, UnhookWindowsHookEx, WaitMessage, WindowFromPoint, GA_ROOT, KBDLLHOOKSTRUCT,
-    LLKHF_EXTENDED, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP,
-    WM_SYSKEYDOWN, WM_XBUTTONDOWN, WM_XBUTTONUP,
-};
-
-#[cfg(target_os = "macos")]
 #[path = "hotkeys_macos.rs"]
 mod macos_support;
-#[cfg(target_os = "macos")]
 use macos_support::vk_codes::*;
-#[cfg(target_os = "macos")]
 use macos_support::{macos_event_tap, macos_input};
-
-#[cfg(target_os = "windows")]
-const PM_REMOVE: u32 = 0x0001;
-#[cfg(target_os = "windows")]
-const PM_NOREMOVE: u32 = 0x0000;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(4);
 
@@ -274,15 +249,8 @@ pub fn parse_hotkey_binding(hotkey: &str) -> AppResult<HotkeyBinding> {
     })
 }
 
-/// On Windows, VK_A..VK_Z equal the ASCII uppercase value.
-#[cfg(target_os = "windows")]
-fn letter_to_vk(ch: char) -> Option<i32> {
-    Some(ch.to_ascii_uppercase() as i32)
-}
-
-/// On macOS, letters are CGKeyCodes for ANSI US layout *positions*, which are
+/// Letters are CGKeyCodes for ANSI US layout *positions*, which are
 /// not alphabetical.
-#[cfg(target_os = "macos")]
 fn letter_to_vk(ch: char) -> Option<i32> {
     let code: u16 = match ch {
         'a' => 0x00,
@@ -316,15 +284,8 @@ fn letter_to_vk(ch: char) -> Option<i32> {
     Some(code as i32)
 }
 
-/// On Windows the digit VKs equal their ASCII value.
-#[cfg(target_os = "windows")]
-fn digit_to_vk(ch: char) -> Option<i32> {
-    Some(ch as i32)
-}
-
-/// On macOS digits have their own CGKeyCodes (and 5/6 and 7/8/9 are not in
+/// Digits have their own CGKeyCodes (and 5/6 and 7/8/9 are not in
 /// numeric order).
-#[cfg(target_os = "macos")]
 fn digit_to_vk(ch: char) -> Option<i32> {
     let code: u16 = match ch {
         '1' => 0x12,
@@ -444,148 +405,25 @@ pub fn format_hotkey_binding(binding: &HotkeyBinding) -> String {
     parts.join("+")
 }
 
-#[cfg(target_os = "windows")]
-static PHYSICAL_KEY_STATE: OnceLock<&'static [AtomicBool; 256]> = OnceLock::new();
 static HOOKS_ACTIVE: AtomicBool = AtomicBool::new(false);
-
-#[cfg(target_os = "windows")]
-fn physical_key_state() -> &'static [AtomicBool; 256] {
-    PHYSICAL_KEY_STATE
-        .get_or_init(|| Box::leak(Box::new(std::array::from_fn(|_| AtomicBool::new(false)))))
-}
-
-#[cfg(target_os = "windows")]
-fn is_physical_vk_down(vk: i32) -> bool {
-    if !(0..256).contains(&vk) {
-        return false;
-    }
-    physical_key_state()[vk as usize].load(Ordering::Relaxed)
-}
 
 /// On macOS the CGEventTap *is* the physical key source (and modifiers come
 /// straight from the HID state), so the physical query is the same as the
 /// regular one.
-#[cfg(target_os = "macos")]
 fn is_physical_vk_down(vk: i32) -> bool {
     is_vk_down(vk)
 }
 
-#[cfg(target_os = "windows")]
-fn normalize_low_level_keyboard_vk(khs: &KBDLLHOOKSTRUCT) -> i32 {
-    match khs.vkCode as u16 {
-        VK_SHIFT => {
-            let mapped = unsafe { MapVirtualKeyW(khs.scanCode, MAPVK_VSC_TO_VK_EX) };
-            if mapped == 0 {
-                VK_SHIFT as i32
-            } else {
-                mapped as i32
-            }
-        }
-        VK_CONTROL => {
-            if (khs.flags & LLKHF_EXTENDED) != 0 {
-                VK_RCONTROL as i32
-            } else {
-                VK_LCONTROL as i32
-            }
-        }
-        VK_MENU => {
-            if (khs.flags & LLKHF_EXTENDED) != 0 {
-                VK_RMENU as i32
-            } else {
-                VK_LMENU as i32
-            }
-        }
-        _ => khs.vkCode as i32,
-    }
-}
-
-#[cfg(target_os = "windows")]
-unsafe extern "system" fn mouse_ll_proc(n_code: i32, w_param: usize, l_param: isize) -> LRESULT {
-    if n_code >= 0 {
-        let mhs = &*(l_param as *const MSLLHOOKSTRUCT);
-        if (mhs.dwExtraInfo) != AUTOCLICKER_EXTRA_INFO {
-            let (vk, down) = match w_param as u32 {
-                WM_LBUTTONDOWN => (VK_LBUTTON as i32, true),
-                WM_LBUTTONUP => (VK_LBUTTON as i32, false),
-                WM_RBUTTONDOWN => (VK_RBUTTON as i32, true),
-                WM_RBUTTONUP => (VK_RBUTTON as i32, false),
-                WM_MBUTTONDOWN => (VK_MBUTTON as i32, true),
-                WM_MBUTTONUP => (VK_MBUTTON as i32, false),
-                WM_XBUTTONDOWN => {
-                    let x = if ((mhs.mouseData >> 16) & 0xFFFF) == 1 {
-                        VK_XBUTTON1 as i32
-                    } else {
-                        VK_XBUTTON2 as i32
-                    };
-                    (x, true)
-                }
-                WM_XBUTTONUP => {
-                    let x = if ((mhs.mouseData >> 16) & 0xFFFF) == 1 {
-                        VK_XBUTTON1 as i32
-                    } else {
-                        VK_XBUTTON2 as i32
-                    };
-                    (x, false)
-                }
-                _ => (-1, false),
-            };
-            if vk >= 0 && (vk as usize) < 256 {
-                physical_key_state()[vk as usize].store(down, Ordering::Relaxed);
-            }
-        }
-    }
-    CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param)
-}
-
-#[cfg(target_os = "windows")]
-unsafe extern "system" fn keyboard_ll_proc(n_code: i32, w_param: usize, l_param: isize) -> LRESULT {
-    if n_code >= 0 {
-        let khs = &*(l_param as *const KBDLLHOOKSTRUCT);
-        if (khs.dwExtraInfo) != AUTOCLICKER_EXTRA_INFO {
-            let vk = normalize_low_level_keyboard_vk(khs);
-            if (0..256).contains(&vk) {
-                let down = matches!(w_param as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
-                physical_key_state()[vk as usize].store(down, Ordering::Relaxed);
-            }
-        }
-    }
-    CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param)
-}
-
 pub fn start_hotkey_listener(app: AppHandle) {
-    std::thread::spawn(move || unsafe {
-        // Delay hook installation to let WebView2/windows fully initialise.
-        // Installing WH_KEYBOARD_LL too early can cause Windows to generate
-        // spurious Alt-menu events in other applications. Hotkey detection
-        // falls back to GetAsyncKeyState via the HOOKS_ACTIVE check below
-        // during this window.
+    std::thread::spawn(move || {
+        // Let the webview and windows finish initialising before installing the
+        // tap; polling CGEventSourceKeyState covers this window.
         std::thread::sleep(Duration::from_secs(2));
 
-        #[cfg(target_os = "windows")]
-        let (mouse_hook, kb_hook) = {
-            let mouse_hook =
-                SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_ll_proc), std::ptr::null_mut(), 0);
-            let kb_hook = SetWindowsHookExW(
-                WH_KEYBOARD_LL,
-                Some(keyboard_ll_proc),
-                std::ptr::null_mut(),
-                0,
-            );
-
-            if !mouse_hook.is_null() && !kb_hook.is_null() {
-                HOOKS_ACTIVE.store(true, Ordering::SeqCst);
-            } else {
-                let err = GetLastError();
-                log::warn!("[Hotkeys] {}", AppError::WindowsSystem(err));
-            }
-            (mouse_hook, kb_hook)
-        };
-
-        // macOS: a CGEventTap replaces the low-level hooks. It only starts if
-        // the user has granted Accessibility permission; without it we fall
-        // back to polling CGEventSourceKeyState, which only sees keys while the
-        // app is frontmost.
-        #[cfg(target_os = "macos")]
+        // The CGEventTap only starts if the user has granted Accessibility
+        // permission; without it we fall back to polling
+        // CGEventSourceKeyState, which only sees keys while the app is
+        // frontmost.
         {
             let _ = APP_FOR_CURSOR.set(app.clone());
             macos_event_tap::start();
@@ -611,20 +449,8 @@ pub fn start_hotkey_listener(app: AppHandle) {
         let mut was_suppressed = false;
         let mut master_was_pressed = false;
         let mut last_check = Instant::now();
-        #[cfg(target_os = "windows")]
-        let mut msg: MSG = std::mem::zeroed();
-
-        #[cfg_attr(not(target_os = "windows"), allow(unused_labels))]
+        #[allow(unused_labels)]
         'outer: loop {
-            #[cfg(target_os = "windows")]
-            {
-                while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
-                    if msg.message == WM_QUIT {
-                        break 'outer;
-                    }
-                }
-            }
-
             if last_check.elapsed() >= POLL_INTERVAL {
                 last_check = Instant::now();
 
@@ -775,29 +601,12 @@ pub fn start_hotkey_listener(app: AppHandle) {
 
                 was_pressed = currently_pressed;
             } else if HOOKS_ACTIVE.load(Ordering::Relaxed) {
-                #[cfg(target_os = "windows")]
-                {
-                    if PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_NOREMOVE) == 0 {
-                        WaitMessage();
-                    }
-                }
                 // No message queue to park on; the tap runs on its own runloop.
-                #[cfg(target_os = "macos")]
                 {
                     std::thread::sleep(POLL_INTERVAL);
                 }
             } else {
                 std::thread::sleep(POLL_INTERVAL);
-            }
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            if !mouse_hook.is_null() {
-                UnhookWindowsHookEx(mouse_hook);
-            }
-            if !kb_hook.is_null() {
-                UnhookWindowsHookEx(kb_hook);
             }
         }
     });
@@ -814,13 +623,11 @@ fn is_mouse_hotkey_binding(binding: &HotkeyBinding) -> bool {
     binding.main_vks.iter().any(|vk| mouse_vks.contains(vk))
 }
 
-#[cfg(target_os = "macos")]
 static APP_FOR_CURSOR: OnceLock<AppHandle> = OnceLock::new();
 
-/// macOS equivalent of the Win32 WindowFromPoint check: is the pointer inside
+/// Is the pointer inside
 /// one of our own windows? Used to stop a mouse-button hotkey from firing while
 /// the user is clicking the app's own UI.
-#[cfg(target_os = "macos")]
 fn is_cursor_over_own_window() -> bool {
     let Some(app) = APP_FOR_CURSOR.get() else {
         return false;
@@ -844,25 +651,6 @@ fn is_cursor_over_own_window() -> bool {
         }
     }
     false
-}
-
-#[cfg(target_os = "windows")]
-fn is_cursor_over_own_window() -> bool {
-    unsafe {
-        let mut pt: POINT = std::mem::zeroed();
-        if GetCursorPos(&mut pt) == 0 {
-            return false;
-        }
-        let hwnd = WindowFromPoint(pt);
-        if hwnd.is_null() {
-            return false;
-        }
-        let root = GetAncestor(hwnd, GA_ROOT);
-        let root = if root.is_null() { hwnd } else { root };
-        let mut pid: u32 = 0;
-        GetWindowThreadProcessId(root, &mut pid);
-        pid == GetCurrentProcessId()
-    }
 }
 
 fn is_hotkey_binding_pressed_physical(binding: &HotkeyBinding, strict: bool) -> bool {
@@ -1126,14 +914,8 @@ fn modifiers_match(binding: &HotkeyBinding, down: &DownState, strict: bool) -> b
     true
 }
 
-#[cfg(target_os = "windows")]
-pub fn is_vk_down(vk: i32) -> bool {
-    unsafe { (GetAsyncKeyState(vk) as u16 & 0x8000) != 0 }
-}
-
 /// Modifier keys emit NX_FLAGSCHANGED rather than key-down/up, so the tap
 /// never sees them; query the HID state directly for those.
-#[cfg(target_os = "macos")]
 fn is_modifier_vk(vk: u16) -> bool {
     matches!(
         vk,
@@ -1141,7 +923,6 @@ fn is_modifier_vk(vk: u16) -> bool {
     )
 }
 
-#[cfg(target_os = "macos")]
 pub fn is_vk_down(vk: i32) -> bool {
     match vk as u16 {
         VK_LBUTTON => macos_event_tap::is_mouse_down(0),
@@ -1270,15 +1051,8 @@ fn parse_numpad_token(token: &str) -> Option<(i32, String)> {
     }
 }
 
-/// Windows lays F1..F24 out contiguously.
-#[cfg(target_os = "windows")]
-fn function_key_vk(number: i32) -> Option<i32> {
-    Some(VK_F1 as i32 + (number - 1))
-}
-
-/// macOS CGKeyCodes for the function keys are NOT contiguous, so they have to
-/// be looked up. F21-F24 have no macOS equivalent.
-#[cfg(target_os = "macos")]
+/// CGKeyCodes for the function keys are NOT contiguous, so they have to
+/// be looked up. F21-F24 have no equivalent.
 fn function_key_vk(number: i32) -> Option<i32> {
     const FN_KEYS: [u16; 20] = [
         0x7A, 0x78, 0x63, 0x76, 0x60, 0x61, 0x62, 0x64, 0x65, 0x6D, // F1-F10

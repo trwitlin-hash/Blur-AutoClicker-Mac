@@ -42,9 +42,6 @@ pub enum AppError {
     #[error("{0}")]
     HotkeyConflict(String),
 
-    #[error("Windows API call failure. System Error Code: {0}")]
-    WindowsSystem(u32),
-
     #[error("High-precision hardware timer unavailable on this machine")]
     TimerPrecision,
 
@@ -106,14 +103,9 @@ impl Serialize for AppError {
                 code: "HOTKEY_CONFLICT",
                 message: msg.clone(),
             },
-            AppError::WindowsSystem(code) => ErrorPayload {
-                code: "WIN_API_FAILURE",
-                message: format!("Windows API error code: {:#X}", code),
-            },
             AppError::TimerPrecision => ErrorPayload {
                 code: "TIMER_UNAVAILABLE",
-                message: "Failed to establish sub-millisecond Windows timer resolution."
-                    .to_string(),
+                message: "Failed to establish sub-millisecond timer resolution.".to_string(),
             },
             AppError::ChannelFailure => ErrorPayload {
                 code: "THREAD_SYNC_FAILURE",
@@ -226,14 +218,6 @@ mod tests {
         let val = serde_json::to_value(&err).unwrap();
         assert_eq!(val["code"], "HOTKEY_CONFLICT");
         assert_eq!(val["message"], "conflict with Ctrl+K");
-    }
-
-    #[test]
-    fn app_error_windows_system_serializes_correctly() {
-        let err = AppError::WindowsSystem(5);
-        let val = serde_json::to_value(&err).unwrap();
-        assert_eq!(val["code"], "WIN_API_FAILURE");
-        assert!(val["message"].as_str().unwrap().contains("0x5"));
     }
 
     #[test]

@@ -15,15 +15,6 @@ static CLICK_POINT_PICK_OVERLAY_ACTIVE: AtomicBool = AtomicBool::new(false);
 static CUSTOM_STOP_ZONE_PICK_OVERLAY_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub static OVERLAY_THREAD_RUNNING: AtomicBool = AtomicBool::new(true);
 
-#[cfg(target_os = "windows")]
-use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetWindowLongW, SetWindowLongW, SetWindowPos, ShowWindow, GWL_EXSTYLE, GWL_STYLE, HWND_TOPMOST,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
-};
-
-#[cfg(target_os = "windows")]
-use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMNCRP_DISABLED};
-
 pub fn init_overlay(app: &AppHandle) -> AppResult<()> {
     let window = match app.get_webview_window("overlay") {
         Some(w) => w,
@@ -63,12 +54,6 @@ pub fn init_overlay(app: &AppHandle) -> AppResult<()> {
     window.set_ignore_cursor_events(true)?;
     let _ = window.set_decorations(false);
 
-    #[cfg(target_os = "windows")]
-    {
-        apply_win32_styles(&window)?;
-        let _ = sync_overlay_bounds(&window)?;
-    }
-
     log::info!("[Overlay] Init complete — window configured but hidden");
     Ok(())
 }
@@ -90,15 +75,6 @@ pub fn show_overlay(app: &AppHandle) -> AppResult<()> {
         .ok_or_else(|| AppError::OverlayNotFound)?;
     let bounds = current_virtual_screen_rect()
         .ok_or_else(|| AppError::State("Virtual screen bounds not available".into()))?;
-
-    #[cfg(target_os = "windows")]
-    {
-        sync_overlay_bounds(&window)?;
-        let visible = window.is_visible().unwrap_or(false);
-        if !visible {
-            show_overlay_window(&window)?;
-        }
-    }
 
     *LAST_ZONE_SHOW.lock().unwrap_or_else(poisoned_inner) = Some(Instant::now());
 
@@ -175,14 +151,6 @@ pub fn show_click_points_overlay(app: &AppHandle) -> AppResult<()> {
         settings.click_points.clone()
     };
 
-    #[cfg(target_os = "windows")]
-    {
-        sync_overlay_bounds(&window)?;
-        if !points.is_empty() {
-            show_overlay_window(&window)?;
-        }
-    }
-
     emit_click_points(&window, bounds, &points, false);
     if points.is_empty() && !CLICK_POINT_PICK_OVERLAY_ACTIVE.load(Ordering::SeqCst) {
         *LAST_ZONE_SHOW.lock().unwrap_or_else(poisoned_inner) = None;
@@ -199,12 +167,6 @@ pub fn show_click_point_pick_overlay(app: &AppHandle) -> AppResult<()> {
         .ok_or_else(|| AppError::OverlayNotFound)?;
     let bounds = current_virtual_screen_rect()
         .ok_or_else(|| AppError::State("Virtual screen bounds not available".into()))?;
-
-    #[cfg(target_os = "windows")]
-    {
-        sync_overlay_bounds(&window)?;
-        show_overlay_window(&window)?;
-    }
 
     CLICK_POINT_PICK_OVERLAY_ACTIVE.store(true, Ordering::SeqCst);
 
@@ -246,12 +208,6 @@ pub fn show_custom_stop_zone_pick_overlay(app: &AppHandle) -> AppResult<()> {
         .ok_or_else(|| AppError::OverlayNotFound)?;
     let bounds = current_virtual_screen_rect()
         .ok_or_else(|| AppError::State("Virtual screen bounds not available".into()))?;
-
-    #[cfg(target_os = "windows")]
-    {
-        sync_overlay_bounds(&window)?;
-        show_overlay_window(&window)?;
-    }
 
     CUSTOM_STOP_ZONE_PICK_OVERLAY_ACTIVE.store(true, Ordering::SeqCst);
     show_overlay(app)?;
@@ -325,7 +281,7 @@ fn emit_click_points(
 
 // ---- Background timer ----
 
-#[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+#[allow(unused_variables)]
 pub fn check_auto_hide(app: &AppHandle) {
     if CLICK_POINT_PICK_OVERLAY_ACTIVE.load(Ordering::SeqCst)
         || CUSTOM_STOP_ZONE_PICK_OVERLAY_ACTIVE.load(Ordering::SeqCst)
@@ -340,10 +296,6 @@ pub fn check_auto_hide(app: &AppHandle) {
 
             *last = None;
             log::info!("[Overlay] Auto-hide: hiding window");
-            #[cfg(target_os = "windows")]
-            if let Some(window) = app.get_webview_window("overlay") {
-                hide_overlay_window(&window);
-            }
         }
     }
 }
@@ -360,105 +312,5 @@ pub fn hide_overlay(app: AppHandle) -> AppResult<()> {
 }
 
 fn hide_overlay_window(window: &tauri::WebviewWindow) {
-    #[cfg(target_os = "windows")]
-    {
-        if let Ok(hwnd) = get_hwnd(window) {
-            unsafe { ShowWindow(hwnd, 0) };
-        }
-    }
-    #[cfg(not(target_os = "windows"))]
     let _ = window.hide();
-}
-
-#[cfg(target_os = "windows")]
-fn get_hwnd(window: &tauri::WebviewWindow) -> AppResult<*mut std::ffi::c_void> {
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    let handle = window
-        .window_handle()
-        .map_err(|e| AppError::State(e.to_string()))?;
-    match handle.as_raw() {
-        RawWindowHandle::Win32(w) => Ok(w.hwnd.get() as *mut std::ffi::c_void),
-        _ => Err(AppError::State("Not a Win32 window".into())),
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn apply_win32_styles(window: &tauri::WebviewWindow) -> AppResult<()> {
-    let hwnd = get_hwnd(window)?;
-
-    unsafe {
-        let style = GetWindowLongW(hwnd, GWL_STYLE);
-        SetWindowLongW(hwnd, GWL_STYLE, ((style as u32) | 0x8000_0000) as i32);
-
-        let ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
-        let new_ex =
-            ((ex as u32) | 0x0800_0000 | 0x0000_0080 | 0x0000_0020 | 0x0000_0008) & !0x0004_0000;
-        SetWindowLongW(hwnd, GWL_EXSTYLE, new_ex as i32);
-
-        let policy = DWMNCRP_DISABLED;
-        DwmSetWindowAttribute(
-            hwnd,
-            2,
-            &policy as *const i32 as *const _,
-            std::mem::size_of::<i32>() as u32,
-        );
-
-        SetWindowPos(
-            hwnd,
-            std::ptr::null_mut(),
-            0,
-            0,
-            0,
-            0,
-            SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
-        );
-    }
-
-    log::info!("[Overlay] Win32 styles applied");
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-fn sync_overlay_bounds(window: &tauri::WebviewWindow) -> AppResult<VirtualScreenRect> {
-    let bounds = current_virtual_screen_rect()
-        .ok_or_else(|| AppError::State("Virtual screen bounds not available".into()))?;
-    let hwnd = get_hwnd(window)?;
-
-    unsafe {
-        SetWindowPos(
-            hwnd,
-            std::ptr::null_mut(),
-            bounds.left,
-            bounds.top,
-            bounds.width,
-            bounds.height,
-            SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOZORDER,
-        );
-    }
-
-    Ok(bounds)
-}
-
-#[cfg(target_os = "windows")]
-fn show_overlay_window(window: &tauri::WebviewWindow) -> AppResult<()> {
-    let _ = window.eval(
-        "document.getElementById('zone-layer').innerHTML = ''; \
-         document.getElementById('click-points-layer').innerHTML = '';",
-    );
-
-    let hwnd = get_hwnd(window)?;
-
-    unsafe {
-        SetWindowPos(
-            hwnd,
-            HWND_TOPMOST,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
-        );
-    }
-
-    Ok(())
 }

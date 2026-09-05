@@ -4,22 +4,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::engine::start_clicker as engine_start;
-use crate::engine::stats::{print_run_stats, record_run};
-use crate::error::poisoned_inner;
-use crate::error::AppError;
-use crate::error::AppResult;
-use crate::ClickerSettings;
-use crate::ClickerState;
-use crate::ClickerStatusPayload;
-use crate::STATUS_EVENT;
-#[cfg(target_os = "windows")]
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime;
-#[cfg(target_os = "windows")]
-use windows_sys::Win32::UI::WindowsAndMessaging::{
-    SystemParametersInfoW, SPI_GETKEYBOARDDELAY, SPI_GETKEYBOARDSPEED,
-};
-
 use super::cycle::ClickCyclePlan;
 use super::failsafe::detect_stop_zones;
 use super::failsafe::should_stop_for_failsafe;
@@ -32,33 +16,21 @@ use super::process;
 use super::rng::SmallRng;
 use super::ClickPointTarget;
 use super::ClickerConfig;
-#[cfg(target_os = "windows")]
-use super::NtSetTimerResolution;
 use super::RunOutcome;
 use super::CLICK_COUNT;
+use crate::engine::start_clicker as engine_start;
+use crate::engine::stats::{print_run_stats, record_run};
+use crate::error::poisoned_inner;
+use crate::error::AppError;
+use crate::error::AppResult;
+use crate::ClickerSettings;
+use crate::ClickerState;
+use crate::ClickerStatusPayload;
+use crate::STATUS_EVENT;
 
 // -- CPU measurement --
 // changed from normal cpu measurement because it was not accurately
 // showing cpu usage for short clicker run times.
-
-#[cfg(target_os = "windows")]
-windows_targets::link!(
-    "kernel32.dll" "system" fn QueryThreadCycleTime(thread: *mut core::ffi::c_void, cycles: *mut u64) -> i32
-);
-#[cfg(target_os = "windows")]
-windows_targets::link!(
-    "kernel32.dll" "system" fn GetCurrentThread() -> *mut core::ffi::c_void
-);
-
-#[cfg(target_os = "windows")]
-#[inline]
-fn thread_cycles() -> u64 {
-    let mut cycles: u64 = 0;
-    unsafe {
-        QueryThreadCycleTime(GetCurrentThread(), &mut cycles);
-    }
-    cycles
-}
 
 impl ClickerConfig {
     pub fn use_click_points(&self) -> bool {
@@ -66,19 +38,16 @@ impl ClickerConfig {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
 #[repr(C)]
 struct ThreadCpuTimespec {
     tv_sec: i64,
     tv_nsec: i64,
 }
 
-#[cfg(not(target_os = "windows"))]
 unsafe extern "C" {
     fn clock_gettime(clock_id: i32, tp: *mut ThreadCpuTimespec) -> i32;
 }
 
-#[cfg(not(target_os = "windows"))]
 #[inline]
 fn thread_cycles() -> u64 {
     const CLOCK_THREAD_CPUTIME_ID: i32 = 16;
@@ -115,33 +84,6 @@ fn calibrate_cycle_freq() -> f64 {
         freq
     } else {
         3_000_000_000.0 // fallback 3 GHz
-    }
-}
-
-#[cfg(target_os = "windows")]
-struct TimerResolutionGuard;
-
-#[cfg(target_os = "windows")]
-impl TimerResolutionGuard {
-    fn new() -> Self {
-        let mut current = 0u32;
-        let status = unsafe { NtSetTimerResolution(10000, 1, &mut current) };
-        if status != 0 {
-            log::warn!(
-                "[Timer] {} (NTSTATUS: {:#X})",
-                AppError::TimerPrecision,
-                status
-            );
-        }
-        Self
-    }
-}
-
-#[cfg(target_os = "windows")]
-impl Drop for TimerResolutionGuard {
-    fn drop(&mut self) {
-        let mut current = 0u32;
-        unsafe { NtSetTimerResolution(10000, 0, &mut current) };
     }
 }
 
@@ -328,13 +270,6 @@ fn interval_secs_from_settings(settings: &ClickerSettings) -> AppResult<f64> {
 }
 
 fn system_double_click_gap_ms() -> u32 {
-    #[cfg(target_os = "windows")]
-    {
-        let system_timeout_ms = unsafe { GetDoubleClickTime() };
-        return ((system_timeout_ms as f64) * 0.9).floor() as u32;
-    }
-
-    #[cfg(not(target_os = "windows"))]
     {
         450
     }
@@ -604,7 +539,6 @@ struct ClickerContext {
 
 /// macOS keeps the equivalent settings in the global domain, in units of
 /// ~15 ms. Read once and cache; fall back to the factory defaults.
-#[cfg(target_os = "macos")]
 fn get_keyboard_repeat_settings() -> (u32, u32) {
     use std::sync::OnceLock;
     static SETTINGS: OnceLock<(u32, u32)> = OnceLock::new();
@@ -626,55 +560,11 @@ fn get_keyboard_repeat_settings() -> (u32, u32) {
     })
 }
 
-#[cfg(target_os = "windows")]
-fn get_keyboard_repeat_settings() -> (u32, u32) {
-    // SPI_GETKEYBOARDDELAY: 0=250ms, 1=500ms, 2=750ms, 3=1000ms
-    let mut delay_setting: u32 = 0;
-    unsafe {
-        SystemParametersInfoW(
-            SPI_GETKEYBOARDDELAY,
-            0,
-            &mut delay_setting as *mut _ as *mut _,
-            0,
-        );
-    }
-    let repeat_delay_ms = match delay_setting {
-        0 => 250,
-        1 => 500,
-        2 => 750,
-        3 => 1000,
-        _ => 250,
-    };
-
-    // SPI_GETKEYBOARDSPEED: 0=2.5 reps/sec (400ms), 31=30 reps/sec (~33ms)
-    // Formula: repeat_interval_ms = 1000 / (2.5 + speed * (30-2.5)/31)
-    let mut speed_setting: u32 = 0;
-    unsafe {
-        SystemParametersInfoW(
-            SPI_GETKEYBOARDSPEED,
-            0,
-            &mut speed_setting as *mut _ as *mut _,
-            0,
-        );
-    }
-    let repeat_interval_ms = if speed_setting >= 31 {
-        33
-    } else {
-        let reps_per_sec = 2.5 + (speed_setting as f64) * (27.5 / 31.0);
-        (1000.0 / reps_per_sec).round() as u32
-    };
-
-    (repeat_delay_ms, repeat_interval_ms)
-}
-
 impl ClickerContext {
     fn new(config: &ClickerConfig) -> Self {
         // Windows uses key_code 0 as the "no key selected" sentinel. On macOS
         // CGKeyCode 0 is the letter A, so the sentinel cannot apply there;
         // build_config already rejects an empty key with NoKeySelected.
-        #[cfg(target_os = "windows")]
-        let is_keyboard = config.input_type.is_keyboard() && config.key_code > 0;
-        #[cfg(not(target_os = "windows"))]
         let is_keyboard = config.input_type.is_keyboard();
         let (down_flag, up_flag) = if is_keyboard {
             (0, 0)
@@ -970,9 +860,6 @@ fn cpu_usage(start_cycles: u64, cycle_freq: f64, elapsed_secs: f64) -> f64 {
 
 pub fn start_clicker(config: ClickerConfig, control: RunControl) -> RunOutcome {
     CLICK_COUNT.store(0, Ordering::SeqCst);
-    #[cfg(target_os = "windows")]
-    let _timer = TimerResolutionGuard::new();
-
     let cycle_freq = calibrate_cycle_freq();
     let cpu_start = thread_cycles();
     let start_time = Instant::now();
@@ -1345,10 +1232,6 @@ mod tests {
         settings.keyboard_key_case = "upper".to_string();
 
         let config = build_config(&settings).expect("letter key should parse");
-        #[cfg(target_os = "windows")]
-        assert_eq!(config.key_code, b'A' as u16);
-
-        #[cfg(target_os = "macos")]
         assert_eq!(config.key_code, 0);
 
         assert!(config.keyboard_uppercase);
@@ -1356,10 +1239,6 @@ mod tests {
         settings.keyboard_key = "1".to_string();
         let config = build_config(&settings).expect("digit key should parse");
 
-        #[cfg(target_os = "windows")]
-        assert_eq!(config.key_code, b'1' as u16);
-
-        #[cfg(target_os = "macos")]
         assert_eq!(config.key_code, 18);
 
         assert!(!config.keyboard_uppercase);
@@ -1397,19 +1276,6 @@ mod tests {
         config.input_type = crate::engine::InputType::Mouse;
         config.duty = 100.0;
         config.interval_secs = 0.1;
-
-        let ctx = ClickerContext::new(&config);
-        assert!(!ctx.keyboard_hold_mode);
-    }
-
-    /// key_code 0 is only a "no key" sentinel on Windows; on macOS it is A.
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn keyboard_no_key_code_no_hold_mode() {
-        let mut config = sample_config();
-        config.input_type = crate::engine::InputType::Keyboard;
-        config.key_code = 0;
-        config.duty = 100.0;
 
         let ctx = ClickerContext::new(&config);
         assert!(!ctx.keyboard_hold_mode);

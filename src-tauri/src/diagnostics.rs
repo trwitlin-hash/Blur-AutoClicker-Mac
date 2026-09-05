@@ -127,18 +127,6 @@ mod tests {
         assert_eq!(exports_dir().unwrap(), root.join("Exports"));
     }
 
-    /// Hardcoded Windows paths; separators differ on other platforms.
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn portable_layout_resolves_single_level() {
-        let exe_dir = std::path::Path::new(r"C:\apps\Blur");
-        let data = crate::portable::portable_data_dir_of(exe_dir);
-        assert_eq!(
-            diagnostics_root_of(&data),
-            std::path::PathBuf::from(r"C:\apps\Blur\Data\Diagnostics")
-        );
-    }
-
     fn with_test_dir(f: impl FnOnce()) {
         let temp = tempfile::tempdir().expect("tempdir");
         TEST_DATA_DIR.with(|d| {

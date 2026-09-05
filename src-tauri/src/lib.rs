@@ -29,80 +29,10 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Listener, Manager};
 
-#[cfg(target_os = "windows")]
-fn disable_browser_accelerator_keys(window: &tauri::WebviewWindow) {
-    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3;
-    use windows_core::Interface;
-
-    let _ = window.with_webview(|webview| {
-        let controller = webview.controller();
-        let core = match unsafe { controller.CoreWebView2() } {
-            Ok(c) => c,
-            Err(e) => {
-                log::warn!("[WebView2] Failed to get CoreWebView2: {e:?}");
-                return;
-            }
-        };
-        let settings = match unsafe { core.Settings() } {
-            Ok(s) => s,
-            Err(e) => {
-                log::warn!("[WebView2] Failed to get Settings: {e:?}");
-                return;
-            }
-        };
-
-        // Cast to ICoreWebView2Settings3 to disable browser accelerator keys
-        if let Ok(settings3) = settings.cast::<ICoreWebView2Settings3>() {
-            match unsafe { settings3.SetAreBrowserAcceleratorKeysEnabled(false) } {
-                Ok(()) => {
-                    log::info!("[WebView2] Browser accelerator keys disabled (F6, Ctrl+F, etc.)")
-                }
-                Err(e) => {
-                    log::warn!("[WebView2] Failed to disable browser accelerator keys: {e:?}")
-                }
-            }
-        } else {
-            log::warn!(
-                "[WebView2] ICoreWebView2Settings3 not available (WebView2 runtime too old?)"
-            );
-        }
-    });
-}
-
 pub static ZONE_MONITOR_RUNNING: AtomicBool = AtomicBool::new(false);
 
 const STATUS_EVENT: &str = "clicker-status";
 
-#[cfg(target_os = "windows")]
-fn apply_ws_ex_noactivate(window: &tauri::WebviewWindow, enable: bool) {
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetWindowLongW, SetWindowLongW, GWL_EXSTYLE,
-    };
-
-    if let Ok(handle) = window.window_handle() {
-        if let RawWindowHandle::Win32(w) = handle.as_raw() {
-            let hwnd = w.hwnd.get() as *mut std::ffi::c_void;
-            unsafe {
-                let ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
-                let new_ex = if enable {
-                    (ex as u32 | 0x08000000) as i32
-                } else {
-                    (ex as u32 & !0x08000000) as i32
-                };
-                SetWindowLongW(hwnd, GWL_EXSTYLE, new_ex);
-            }
-        }
-    }
-}
-
-#[cfg(target_os = "windows")]
-#[cfg(target_os = "windows")]
-fn is_rtss_running() -> bool {
-    crate::engine::process::is_process_running("RTSS.exe")
-}
-
-#[cfg(not(target_os = "windows"))]
 fn is_rtss_running() -> bool {
     false
 }
@@ -120,9 +50,7 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
             .maximizable(false)
             .shadow(false);
 
-    // Set our own icon at creation so Windows associates the window with it
-    // rather than the bundled EXE icon resource (which can shadow runtime
-    // updates in release builds).
+    // Set our own icon at creation rather than relying on the bundle resource.
     if let Some(icon) = crate::icon::default_icon_image() {
         builder = builder.icon(icon)?;
     }
@@ -132,47 +60,13 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
         builder = builder.data_directory(dir);
     }
 
-    #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+    #[allow(unused_variables)]
     let window = builder.build()?;
 
     // Re-apply the window icon once the window is registered with the taskbar
     // (first focus/resize), because Explorer may have cached the EXE icon into
     // the taskbar slot before our WM_SETICON at creation arrived.
-    #[cfg(target_os = "windows")]
-    {
-        let applied = std::sync::atomic::AtomicBool::new(false);
-        let handle = app.handle().clone();
-        window.on_window_event(move |event| {
-            let fire = matches!(
-                event,
-                tauri::WindowEvent::Focused(true) | tauri::WindowEvent::Resized(_)
-            ) && !applied.swap(true, std::sync::atomic::Ordering::SeqCst);
-            if fire {
-                crate::icon::set_app_icons(&handle);
-            }
-        });
-    }
-
     Ok(())
-}
-
-#[cfg(windows)]
-fn set_app_aumid() {
-    use windows_sys::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
-
-    // A stable, explicit AppUserModelID so Windows Explorer does not group or
-    // cache this app under the bundled EXE icon, which otherwise shadows
-    // runtime icon updates in release builds.
-    let wide: Vec<u16> = "BlurAutoClicker.App"
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-    unsafe {
-        let hr = SetCurrentProcessExplicitAppUserModelID(wide.as_ptr());
-        if hr < 0 {
-            log::warn!("[icon] SetCurrentProcessExplicitAppUserModelID failed: HRESULT {hr:#x}");
-        }
-    }
 }
 
 fn setup_panic_hook() {
@@ -188,26 +82,6 @@ fn setup_panic_hook() {
         log::error!("[Crash] {report}");
 
         crate::diagnostics::write_panic_report(&report);
-
-        #[cfg(target_os = "windows")]
-        unsafe {
-            use windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW;
-            use windows_sys::Win32::UI::WindowsAndMessaging::MB_ICONERROR;
-            let wide: Vec<u16> = "BlurAutoClicker encountered a fatal error and needs to close.\nPlease check the log for details.\n\n"
-                .encode_utf16()
-                .chain(std::iter::once(0))
-                .collect();
-            let title: Vec<u16> = "BlurAutoClicker - Fatal Error"
-                .encode_utf16()
-                .chain(std::iter::once(0))
-                .collect();
-            MessageBoxW(
-                std::ptr::null_mut(),
-                wide.as_ptr(),
-                title.as_ptr(),
-                MB_ICONERROR,
-            );
-        }
     }));
 }
 
@@ -262,8 +136,6 @@ fn setup_tray(app: &AppHandle) -> Result<(), tauri::Error> {
             "show" => {
                 crate::window_lifecycle::on_show(app);
                 if let Some(window) = app.get_webview_window("main") {
-                    #[cfg(target_os = "windows")]
-                    apply_ws_ex_noactivate(&window, false);
                     let _ = window.show();
                     crate::icon::set_app_icons(app);
                     let _ = window.set_focus();
@@ -290,8 +162,6 @@ fn setup_tray(app: &AppHandle) -> Result<(), tauri::Error> {
                 let app = tray.app_handle();
                 crate::window_lifecycle::on_show(app);
                 if let Some(window) = app.get_webview_window("main") {
-                    #[cfg(target_os = "windows")]
-                    apply_ws_ex_noactivate(&window, false);
                     let _ = window.show();
                     crate::icon::set_app_icons(app);
                     let _ = window.set_focus();
@@ -390,7 +260,6 @@ fn spawn_start_zone_monitor(app: &AppHandle) {
     });
 }
 
-#[cfg(target_os = "macos")]
 fn setup_macos_overlay_guard(app: &AppHandle) {
     let suppress_handle = app.clone();
     std::thread::spawn(move || {
@@ -438,14 +307,6 @@ fn setup_frontend_listener(app: &AppHandle) {
         log::info!("[Window] Frontend ready, initializing overlay...");
         if let Err(e) = overlay::init_overlay(&overlay_init_handle) {
             log::error!("[Window] Overlay init failed: {e}");
-        }
-        #[cfg(target_os = "windows")]
-        if let Some(window) = overlay_init_handle.get_webview_window("main") {
-            apply_ws_ex_noactivate(&window, false);
-            log::info!("[Window] Cleared WS_EX_NOACTIVATE on main window");
-            // Apply here (not at window creation) so CoreWebView2 is guaranteed
-            // to exist — applying earlier can silently no-op and leave F6 crashing.
-            disable_browser_accelerator_keys(&window);
         }
     });
 }
@@ -515,52 +376,13 @@ pub fn run() {
         .setup(move |app| {
             let handle = app.handle().clone();
             setup_logging(&handle);
-            #[cfg(windows)]
-            set_app_aumid();
-
             // No signed macOS update feed exists for this fork, and the
             // upstream feed publishes Windows artifacts only.
-            #[cfg(target_os = "windows")]
-            if !crate::portable::is_portable() {
-                app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
-            }
-
             if let Err(e) = create_main_window(app) {
                 log::error!("[Window] Failed to create main window: {e}");
-                #[cfg(target_os = "windows")]
-                if crate::portable::is_portable() {
-                    let msg = if !crate::portable::webview2_installed() {
-                        if crate::portable::webview2_bootstrapper_started() {
-                            "The Microsoft Edge WebView2 Runtime was not found.\n\nThe bundled installer was started automatically. Wait a moment, then start BlurAutoClicker again."
-                        } else {
-                            "The Microsoft Edge WebView2 Runtime was not found.\n\nThe app could not start its installer. Install it manually from:\nhttps://go.microsoft.com/fwlink/p/?LinkId=2124703"
-                        }
-                    } else {
-                        &format!(
-                            "The app could not start.\n\n{0}\n\nIf you extracted the app to a folder you cannot write to (such as Program Files), move it somewhere writable (for example Documents or the Desktop).",
-                            e
-                        )
-                    };
-                    crate::portable::notify_fatal_error(msg);
-                    std::process::exit(1);
-                } else {
-                    let msg = format!(
-                        "The application window could not be created.\n\n{0}\n\nIf reinstalling the app does not help, please report the issue at:\nhttps://github.com/Blur009/Blur-AutoClicker/issues",
-                        e
-                    );
-                    crate::portable::notify_fatal_error(&msg);
-                    std::process::exit(1);
-                }
             }
 
-            #[cfg(target_os = "macos")]
             setup_macos_overlay_guard(&handle);
-
-            #[cfg(target_os = "windows")]
-            if let Some(window) = app.get_webview_window("main") {
-                apply_ws_ex_noactivate(&window, true);
-                log::info!("[Window] Applied WS_EX_NOACTIVATE to main window");
-            }
 
             if rtss_detected {
                 log::warn!(
@@ -573,9 +395,7 @@ pub fn run() {
                 log::warn!("[Crashpad] Failed to initialize: {e}");
             }
             setup_tray(&handle)?;
-            crate::icon::set_icon_theme(
-                &handle, "#22c55e", "dark", true, "auto", "theme",
-            );
+            crate::icon::set_icon_theme(&handle, "#22c55e", "dark", true, "auto", "theme");
             spawn_overlay_auto_hide(&handle);
             spawn_start_zone_monitor(&handle);
             window_lifecycle::start_periodic_trimming(30);

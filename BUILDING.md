@@ -1,65 +1,63 @@
 # Building From Source
 
-This project is Windows-first. The maintained desktop build path uses the Rust `x86_64-pc-windows-msvc` toolchain plus Node.js.
+This fork is macOS-only and targets Apple Silicon (`aarch64-apple-darwin`).
+For Windows, use [upstream](https://github.com/Blur009/Blur-AutoClicker).
 
 ## Prerequisites
 
+- macOS 12 or newer on Apple Silicon
+- Xcode Command Line Tools (`xcode-select --install`)
 - Node.js 20 or newer
-- Rust via `rustup`
-- Microsoft C++ Build Tools / Visual Studio Build Tools
+- Rust (`brew install rust`, or via `rustup`)
 
 ## Setup
 
-```powershell
-git clone https://github.com/Blur009/Blur-AutoClicker.git
-cd Blur-AutoClicker
+```bash
+git clone https://github.com/trwitlin-hash/Blur-AutoClicker-Mac.git
+cd Blur-AutoClicker-Mac
 npm install
-rustup default stable-x86_64-pc-windows-msvc
 ```
 
 ## Run in development
 
-```powershell
-npm run dev
+```bash
+npm run tauri -- dev
 ```
 
 ## Build a release bundle
 
-```powershell
-npm run build
+```bash
+APPLE_SIGNING_IDENTITY="-" npm run tauri -- build --target aarch64-apple-darwin
 ```
 
-The built Windows installer is written to `src-tauri/target/release/bundle/nsis/`.
+`APPLE_SIGNING_IDENTITY` is **required**. Without it Tauri emits a
+*linker-signed* bundle: no `Contents/_CodeSignature`, `Sealed Resources=none`,
+and `entitlements.plist` is silently ignored, because Tauri only applies
+entitlements when it signs. macOS binds the Accessibility (TCC) grant to the
+code signature, so an unsealed bundle means the permission will not stick.
 
-## Build the portable zip
+Verify before shipping:
 
-The portable zip contains the exe plus the VC++ runtime DLLs, crashpad handler
-and WebView2 bootstrapper, and ships a `portable.txt` marker that activates
-portable mode at runtime. Build the release first, then:
-
-```powershell
-npm run build
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-portable.ps1
+```bash
+codesign --verify --deep --strict \
+  src-tauri/target/aarch64-apple-darwin/release/bundle/macos/BlurAutoClicker.app
 ```
 
-The zip is written to `BlurAutoClicker-v<version>-portable.zip` in the repo
-root. Running the script locally without `-Tag` defaults the tag to `dev`,
-producing `BlurAutoClicker-vdev-portable.zip`; CI passes the real tag (e.g.
-`-Tag v3.9.1`) so the version in the filename is correct. Portable mode keeps
-all app data (settings, stats, logs, WebView2 user data) inside a `Data/`
-folder next to the exe; there is no in-app auto-update — users download new
-versions from GitHub Releases.
+Outputs land in `src-tauri/target/aarch64-apple-darwin/release/bundle/`
+(`macos/BlurAutoClicker.app` and `dmg/*.dmg`).
 
-## Validation
+## Quality gate
 
-```powershell
-npm run lint
-npm run frontend:build
-cargo fmt --manifest-path src-tauri/Cargo.toml --check
-cargo check --manifest-path src-tauri/Cargo.toml --locked
-cargo test --manifest-path src-tauri/Cargo.toml --locked
+```bash
+npm run check
 ```
 
-## Contributing
+Runs `cargo test`, `cargo check`, `clippy`, `cargo fmt --check`, the frontend
+tests, eslint, prettier, the frontend build and `npm audit`. It refuses to run
+while BlurAutoClicker is open, because a running instance holds the build output.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for pull request guidelines and workflow.
+## Accessibility
+
+Nothing clicks until **System Settings → Privacy & Security → Accessibility**
+lists and enables BlurAutoClicker. Every rebuild changes the code signature, so
+remove the stale entry with **−** and re-add it after installing a new build.

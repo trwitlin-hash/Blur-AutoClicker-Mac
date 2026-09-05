@@ -3,196 +3,55 @@ name: Release
 on:
   push:
     tags:
-      - "v*"
+      - "v*-macos.*"
+  workflow_dispatch:
 
 permissions:
   contents: write
-  issues: write
 
 jobs:
-  release:
-    name: Build and release
-    runs-on: windows-latest
-    timeout-minutes: 30
-
+  build:
+    name: Build macOS (Apple Silicon)
+    runs-on: macos-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@v4
         with:
-          node-version: 24
-          cache: npm
+          node-version: 22
 
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
-          targets: x86_64-pc-windows-msvc
+          targets: aarch64-apple-darwin
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          workspaces: './src-tauri -> target'
+          workspaces: "./src-tauri -> target"
 
-      - name: Install dependencies
-        run: npm ci
+      - run: npm ci
 
-      - name: Audit Rust dependencies
-        shell: bash
-        working-directory: src-tauri
-        run: |
-          cargo install cargo-audit --locked 2>/dev/null || true
-          cargo audit
-
-      - name: Extract changelog
-        shell: pwsh
-        run: |
-          $version = [regex]::Escape(("${{ github.ref_name }}".TrimStart('v')))
-          $content = Get-Content CHANGELOG.md -Raw
-          $pattern = "(?ms)# v$version .*?(?=\n# v|\z)"
-          $match = [regex]::Match($content, $pattern)
-          if ($match.Success) {
-            Set-Content -Path release_body.md -Value $match.Value.Trim()
-          }
-
+      # APPLE_SIGNING_IDENTITY is required. Without it Tauri emits a
+      # linker-signed bundle with no sealed resources and silently drops
+      # entitlements.plist, which stops the Accessibility grant from sticking.
       - name: Build
-        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-        with:
-          tagName: ${{ github.ref_name }}
-          releaseName: ${{ github.ref_name }}
-          releaseBody: See CHANGELOG.md for details.
-          releaseDraft: false
+          APPLE_SIGNING_IDENTITY: "-"
+        run: npm run tauri -- build --target aarch64-apple-darwin
 
-      - name: Update release body from changelog
-        shell: pwsh
+      - name: Verify the bundle is sealed
+        run: |
+          APP=src-tauri/target/aarch64-apple-darwin/release/bundle/macos/BlurAutoClicker.app
+          codesign --verify --deep --strict "$APP"
+          codesign -dv --verbose=2 "$APP" 2>&1 | grep -q 'Sealed Resources' \
+            || { echo "bundle is not sealed"; exit 1; }
+
+      - name: Publish
+        if: startsWith(github.ref, 'refs/tags/')
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          if (Test-Path release_body.md) {
-            gh release edit "${{ github.ref_name }}" --notes-file release_body.md
-          }
-
-      - name: Create portable package
-        shell: pwsh
-        run: |
-          & "${{ github.workspace }}/scripts/package-portable.ps1" `
-            -RepoRoot "${{ github.workspace }}" `
-            -Tag "${{ github.ref_name }}"
-
-      - name: Upload portable package
-        shell: pwsh
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release upload "${{ github.ref_name }}" `
-            "BlurAutoClicker-${{ github.ref_name }}-portable.zip" `
-            --clobber
-
-  winget:
-    name: Submit to winget-pkgs
-    runs-on: windows-latest
-    needs: release
-    if: ${{ startsWith(github.ref_name, 'v') && !contains(github.ref_name, '-') }}
-    env:
-      WINGET_CREATE_GITHUB_TOKEN: ${{ secrets.WINGET_CREATE_GITHUB_TOKEN }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Derive version
-        id: version
-        shell: pwsh
-        run: |
-          $tag = "${{ github.ref_name }}"
-          Write-Output "version=$($tag.TrimStart('v'))" >> $env:GITHUB_OUTPUT
-
-      - name: Find NSIS installer URL
-        id: asset
-        shell: pwsh
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          $release = gh api "repos/${{ github.repository }}/releases/tags/${{ github.ref_name }}" | ConvertFrom-Json
-          $installer = $release.assets | Where-Object { $_.name -like '*_x64-setup.exe' } | Select-Object -First 1
-          if (-not $installer) { throw 'No NSIS installer asset found' }
-          Write-Output "url=$($installer.browser_download_url)" >> $env:GITHUB_OUTPUT
-
-      - name: Download wingetcreate
-        run: curl.exe -JLO https://aka.ms/wingetcreate/latest
-
-      - name: Verify wingetcreate
-        shell: pwsh
-        run: |
-          $hash = (Get-FileHash .\wingetcreate.exe -Algorithm SHA256).Hash
-          Write-Host "wingetcreate hash: $hash"
-          if (-not $hash) { throw "wingetcreate hash empty — download failed" }
-          # Authenticode pin: wingetcreate must be Microsoft-signed
-          try {
-            $sig = Get-AuthenticodeSignature -FilePath .\wingetcreate.exe
-            if ($sig.Status -ne "Valid" -or $sig.SignerCertificate.Subject -notmatch "Microsoft Corporation") {
-              throw "wingetcreate signature invalid: $($sig.Status) / $($sig.SignerCertificate.Subject)"
-            }
-            Write-Host "wingetcreate signature valid: $($sig.SignerCertificate.Subject)"
-          } catch {
-            throw "Failed to verify wingetcreate signature: $_"
-          }
-          # Optional hash pin if .github/wingetcreate.sha256 is committed
-          if (Test-Path .github/wingetcreate.sha256) {
-            $expected = (Get-Content .github/wingetcreate.sha256 -Raw).Trim().ToLower()
-            # strip comments / whitespace, take first 64 hex
-            $expected = ($expected -split '\s' | Where-Object { $_ -match '^[a-f0-9]{64}$' } | Select-Object -First 1)
-            if ($expected -and $hash.ToLower() -ne $expected) {
-              throw "wingetcreate hash mismatch: expected $expected, got $hash — update .github/wingetcreate.sha256 if legitimate upstream update"
-            }
-          }
-
-      - name: Generate manifest locally
-        shell: pwsh
-        run: |
-          .\wingetcreate.exe update Blur009.BlurAutoClicker `
-            --version "${{ steps.version.outputs.version }}" `
-            --urls "${{ steps.asset.outputs.url }}|x64" `
-            --out ./winget-manifests
-
-      - name: Extract release notes from CHANGELOG
-        shell: pwsh
-        run: |
-          $version = "${{ steps.version.outputs.version }}"
-          $content = Get-Content CHANGELOG.md -Raw
-          $pattern = "(?ms)# v$version .*?(?=\n# v|\z)"
-          $match = [regex]::Match($content, $pattern)
-          if ($match.Success) {
-            Set-Content -Path release_notes.md -Value $match.Value.Trim()
-          } else {
-            Set-Content -Path release_notes.md -Value "See https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}"
-          }
-
-      - name: Inject ReleaseNotes into locale manifest
-        shell: pwsh
-        run: |
-          $notes = Get-Content release_notes.md -Raw
-          $locale = Get-ChildItem ./winget-manifests -Recurse -Filter "*.locale.*.yaml" | Select-Object -First 1
-          if (-not $locale) { throw 'No locale manifest found to add ReleaseNotes' }
-          $body = ($notes.TrimEnd() -split "`n") |
-            Where-Object { $_ -notmatch '^#\s*v\d' } |
-            ForEach-Object { "  " + ($_ -replace "`t", "    ").TrimEnd() }
-          $block = "ReleaseNotes: |`n" + ($body -join "`n") + "`n"
-          Add-Content -Path $locale.FullName -Value $block
-
-      - name: Submit to winget-pkgs
-        shell: pwsh
-        run: |
-          $manifestFile = Get-ChildItem ./winget-manifests -Recurse -Filter "*.yaml" | Select-Object -First 1
-          if (-not $manifestFile) { throw 'No manifest yaml found under ./winget-manifests' }
-          $manifestDir = $manifestFile.DirectoryName
-          .\wingetcreate.exe submit --no-open $manifestDir
-
-      - name: Open issue on failure
-        if: failure()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh issue create `
-            --title "WinGet submission failed for ${{ github.ref_name }}" `
-            --body "The winget-pkgs PR submission failed on release **${{ github.ref_name }}**.
-
-          Check the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for logs.
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME} — Apple Silicon" \
+            --generate-notes \
+            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg

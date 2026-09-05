@@ -1,6 +1,6 @@
 //! macOS platform support for global hotkeys.
 //!
-//! Provides Windows-compatible `VK_*` names mapped onto macOS CGKeyCodes, a
+//! Provides `VK_*`-style names (retaining upstream's naming) mapped onto macOS CGKeyCodes, a
 //! direct HID key/button state query, and a CGEventTap that tracks key state
 //! even when the app is not frontmost. Extracted from the Djozman macOS fork.
 

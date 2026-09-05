@@ -9,10 +9,10 @@ tracking upstream **v3.9.6**.
 > `aarch64-apple-darwin`. Modified on **2026-09-05**, based on upstream tag
 > `v3.9.6`.
 >
-> Windows code paths are retained behind `#[cfg(target_os = "windows")]` rather
-> than deleted, but **only the macOS target is built and tested here** — the
-> Windows target is not verified against this tree and may not compile. Use
-> [upstream](https://github.com/Blur009/Blur-AutoClicker) for Windows.
+> The Windows implementation has been **removed entirely**, not just gated off:
+> the Win32 input layer, WebView2 bootstrapper, NSIS packaging, PowerShell
+> scripts and MSVC toolchain config are all gone. This is a macOS-only tree.
+> Use [upstream](https://github.com/Blur009/Blur-AutoClicker) for Windows.
 
 Upstream is Windows-only by design — the author has
 [declined to support macOS](https://github.com/Blur009/Blur-AutoClicker/pull/214)
@@ -42,6 +42,9 @@ The grant is bound to the app's code signature, so after any rebuild you must
 remove the stale entry with **−** and re-add it.
 
 ## What changed from upstream
+
+The table below records what each Windows mechanism was replaced with; the
+Windows side no longer exists in this tree.
 
 | Concern | Windows (upstream) | macOS (this fork) |
 | --- | --- | --- |

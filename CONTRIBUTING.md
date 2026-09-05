@@ -4,7 +4,7 @@ Thanks for helping improve Blur Auto Clicker.
 
 ## Project scope
 
-- Blur Auto Clicker is a Windows-first desktop app built with Tauri 2, Rust, React, and TypeScript.
+- This fork is a macOS (Apple Silicon) build of Blur Auto Clicker, using Tauri 2, Rust, React, and TypeScript.
 - Keep changes focused. Avoid unrelated refactors in the same pull request.
 - If your change affects the UI, include screenshots or a short recording in the pull request.
 
@@ -13,34 +13,34 @@ Thanks for helping improve Blur Auto Clicker.
 - Node.js 20 or newer
 - Rust via `rustup`
 - Microsoft C++ Build Tools / Visual Studio Build Tools
-- Windows with the Rust `x86_64-pc-windows-msvc` toolchain installed
+- macOS on Apple Silicon with the Rust `aarch64-apple-darwin` toolchain installed
 
 ## Setup
 
-```powershell
+```bash
 git clone https://github.com/Blur009/Blur-AutoClicker.git
 cd Blur-AutoClicker
 npm install
-rustup default stable-x86_64-pc-windows-msvc
+rustup default stable-aarch64-apple-darwin
 ```
 
 ## Local development
 
 Run the app in development:
 
-```powershell
+```bash
 npm run dev
 ```
 
 Build the frontend only:
 
-```powershell
+```bash
 npm run frontend:build
 ```
 
 Build the desktop app bundle:
 
-```powershell
+```bash
 npm run build
 ```
 
@@ -48,7 +48,7 @@ npm run build
 
 Run all checks before opening a pull request:
 
-```powershell
+```bash
 npm run check:all
 ```
 

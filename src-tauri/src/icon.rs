@@ -302,8 +302,6 @@ impl IconBackend for WindowSink {
         // Tauri's set_icon updates the in-memory icon but Windows keeps showing
         // the EXE's bundled icon on the taskbar button (which is ICON_BIG). Push
         // ICON_BIG explicitly so the taskbar reflects the tinted icon.
-        #[cfg(windows)]
-        force_window_icon_big(&self.0, img);
         Ok(())
     }
 
@@ -320,7 +318,6 @@ impl IconBackend for TraySink {
 
     fn set_tray_icon(&self, img: &RgbaImage) -> Result<(), IconError> {
         let image = Image::new_owned(img.clone().into_raw(), img.width(), img.height());
-        // Windows Explorer caches tray icons by the HICON identity. A plain
         // NIM_MODIFY won't repaint in many cases (notably release builds), so
         // remove then re-add to force a fresh notification-area icon.
         let _ = self.0.set_icon(None);
@@ -330,52 +327,8 @@ impl IconBackend for TraySink {
     }
 }
 
-#[cfg(windows)]
-#[cfg(target_os = "windows")]
-fn force_window_icon_big(window: &tauri::WebviewWindow, img: &RgbaImage) {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        DestroyIcon, SendMessageW, ICON_BIG, ICON_SMALL, WM_SETICON,
-    };
-
-    // Create distinct handles for small and big so each taskbar slot owns its
-    // own icon and neither handle is double-freed on window teardown.
-    let Some(hicon_small) = rgba_to_hicon(img) else {
-        log::warn!("[icon] force_window_icon_big: small HICON creation failed");
-        return;
-    };
-    let Some(hicon_big) = rgba_to_hicon(img) else {
-        log::warn!("[icon] force_window_icon_big: big HICON creation failed");
-        unsafe { DestroyIcon(hicon_small) };
-        return;
-    };
-    let Ok(hwnd) = window.hwnd() else {
-        log::warn!("[icon] force_window_icon_big: hwnd unavailable");
-        unsafe {
-            DestroyIcon(hicon_small);
-            DestroyIcon(hicon_big);
-        }
-        return;
-    };
-    // Tauri returns the `windows` crate's HWND (newtype over *mut c_void);
-    // `windows-sys` SendMessageW takes its HWND alias (= *mut c_void).
-    let hwnd = hwnd.0;
-    unsafe {
-        // Returns the previous icon handle for each size; destroy it to avoid
-        // exhausting the GDI handle heap across repeated runtime updates.
-        let prev_small = SendMessageW(hwnd, WM_SETICON, ICON_SMALL as usize, hicon_small as isize);
-        let prev_big = SendMessageW(hwnd, WM_SETICON, ICON_BIG as usize, hicon_big as isize);
-        if prev_small != 0 && prev_small != hicon_small as isize {
-            DestroyIcon(prev_small as windows_sys::Win32::UI::WindowsAndMessaging::HICON);
-        }
-        if prev_big != 0 && prev_big != hicon_big as isize && prev_big != prev_small {
-            DestroyIcon(prev_big as windows_sys::Win32::UI::WindowsAndMessaging::HICON);
-        }
-    }
-}
-
 // Premultiply straight RGBA (as the `image` crate stores it) into the BGRA
-// byte order Windows icon bitmaps require, with alpha premultiplied.
-#[cfg(any(target_os = "windows", test))]
+#[cfg(test)]
 fn premultiply_rgba_to_bgra(raw: &[u8]) -> Vec<u8> {
     let mut px = Vec::with_capacity(raw.len());
     for p in raw.chunks_exact(4) {
@@ -391,78 +344,6 @@ fn premultiply_rgba_to_bgra(raw: &[u8]) -> Vec<u8> {
 // Build an HICON from RGBA via a premultiplied-alpha color bitmap
 // (BITMAPV5HEADER + BI_BITFIELDS + alpha mask). Negative height = top-down
 // DIB, matching the `image` crate's row 0 = top ordering.
-#[cfg(windows)]
-#[cfg(target_os = "windows")]
-fn rgba_to_hicon(img: &RgbaImage) -> Option<windows_sys::Win32::UI::WindowsAndMessaging::HICON> {
-    use windows_sys::Win32::Graphics::Gdi::{
-        CreateBitmap, CreateDIBSection, DeleteObject, GetDC, ReleaseDC, BITMAPV5HEADER,
-        BI_BITFIELDS, DIB_RGB_COLORS, HBITMAP,
-    };
-    use windows_sys::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, ICONINFO};
-
-    let (w, h) = (img.width() as i32, img.height() as i32);
-    let px = premultiply_rgba_to_bgra(img.as_raw());
-
-    let mut bmi: BITMAPV5HEADER = unsafe { std::mem::zeroed() };
-    bmi.bV5Size = std::mem::size_of::<BITMAPV5HEADER>() as u32;
-    bmi.bV5Width = w;
-    bmi.bV5Height = -h; // top-down
-    bmi.bV5Planes = 1;
-    bmi.bV5BitCount = 32;
-    bmi.bV5Compression = BI_BITFIELDS;
-    bmi.bV5RedMask = 0x00FF_0000;
-    bmi.bV5GreenMask = 0x0000_FF00;
-    bmi.bV5BlueMask = 0x0000_00FF;
-    bmi.bV5AlphaMask = 0xFF00_0000;
-
-    let hdc = unsafe { GetDC(std::ptr::null_mut()) };
-    let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
-    let hbmp = unsafe {
-        CreateDIBSection(
-            hdc,
-            &bmi as *const _ as *const _,
-            DIB_RGB_COLORS,
-            &mut bits,
-            core::ptr::null_mut(),
-            0,
-        )
-    };
-    if hbmp.is_null() {
-        if !hdc.is_null() {
-            unsafe { ReleaseDC(std::ptr::null_mut(), hdc) };
-        }
-        return None;
-    }
-    unsafe {
-        std::ptr::copy_nonoverlapping(px.as_ptr(), bits as *mut u8, px.len());
-        ReleaseDC(std::ptr::null_mut(), hdc);
-    }
-
-    // Fully-transparent (all-zero) 1bpp mask: the color bitmap's alpha channel
-    // drives transparency.
-    let mask_bytes = (((w + 15) / 16) * 16 / 8 * h) as usize;
-    let mask = vec![0u8; mask_bytes.max(1)];
-    let hmask = unsafe { CreateBitmap(w, h, 1, 1, mask.as_ptr() as *const _) };
-
-    let ii = ICONINFO {
-        fIcon: 1,
-        xHotspot: 0,
-        yHotspot: 0,
-        hbmMask: hmask,
-        hbmColor: hbmp,
-    };
-    let hicon = unsafe { CreateIconIndirect(&ii) };
-    unsafe {
-        DeleteObject(hbmp as HBITMAP);
-        DeleteObject(hmask as HBITMAP);
-    }
-    if hicon.is_null() {
-        None
-    } else {
-        Some(hicon)
-    }
-}
-
 fn tauri_backend(app: &AppHandle) -> TauriIconBackend {
     let window = app
         .get_webview_window("main")
