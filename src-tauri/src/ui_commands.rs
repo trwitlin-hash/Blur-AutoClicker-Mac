@@ -172,7 +172,7 @@ pub fn pick_position() -> AppResult<PositionPayload> {
 
 #[tauri::command]
 pub fn start_click_point_pick(app: AppHandle) -> AppResult<()> {
-    crate::click_point_picker::start_click_point_pick_inner(app)
+    crate::click_point_picker::start_click_point_pick_inner(app).map_err(AppError::State)
 }
 
 #[tauri::command]
@@ -183,7 +183,7 @@ pub fn cancel_click_point_pick(app: AppHandle) -> AppResult<()> {
 
 #[tauri::command]
 pub fn start_custom_stop_zone_pick(app: AppHandle) -> AppResult<()> {
-    crate::custom_stop_zone_picker::start_custom_stop_zone_pick_inner(app)
+    crate::custom_stop_zone_picker::start_custom_stop_zone_pick_inner(app).map_err(AppError::State)
 }
 
 #[tauri::command]

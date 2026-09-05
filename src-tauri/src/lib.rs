@@ -96,8 +96,15 @@ fn apply_ws_ex_noactivate(window: &tauri::WebviewWindow, enable: bool) {
     }
 }
 
+#[cfg(target_os = "windows")]
+#[cfg(target_os = "windows")]
 fn is_rtss_running() -> bool {
     crate::engine::process::is_process_running("RTSS.exe")
+}
+
+#[cfg(not(target_os = "windows"))]
+fn is_rtss_running() -> bool {
+    false
 }
 
 fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
@@ -125,6 +132,7 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
         builder = builder.data_directory(dir);
     }
 
+    #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
     let window = builder.build()?;
 
     // Re-apply the window icon once the window is registered with the taskbar
@@ -181,6 +189,7 @@ fn setup_panic_hook() {
 
         crate::diagnostics::write_panic_report(&report);
 
+        #[cfg(target_os = "windows")]
         unsafe {
             use windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW;
             use windows_sys::Win32::UI::WindowsAndMessaging::MB_ICONERROR;
@@ -381,6 +390,30 @@ fn spawn_start_zone_monitor(app: &AppHandle) {
     });
 }
 
+#[cfg(target_os = "macos")]
+fn setup_macos_overlay_guard(app: &AppHandle) {
+    let suppress_handle = app.clone();
+    std::thread::spawn(move || {
+        for _ in 0..40 {
+            if let Some(window) = suppress_handle.get_webview_window("overlay") {
+                let _ = window.hide();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        log::info!("[Overlay] macOS startup suppression complete");
+    });
+
+    if let Some(overlay_window) = app.get_webview_window("overlay") {
+        let _ = overlay_window.hide();
+        let hide_handle = overlay_window.clone();
+        overlay_window.on_window_event(move |event| {
+            if let tauri::WindowEvent::Focused(true) = event {
+                let _ = hide_handle.hide();
+            }
+        });
+    }
+}
+
 fn setup_hotkeys(app: &AppHandle) -> Result<(), std::io::Error> {
     let initial_hotkey = {
         let state = app.state::<ClickerState>();
@@ -516,6 +549,9 @@ pub fn run() {
                     std::process::exit(1);
                 }
             }
+
+            #[cfg(target_os = "macos")]
+            setup_macos_overlay_guard(&handle);
 
             #[cfg(target_os = "windows")]
             if let Some(window) = app.get_webview_window("main") {

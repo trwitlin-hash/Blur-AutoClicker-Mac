@@ -82,13 +82,6 @@ fn trim_webview_processes() {}
 
 pub fn start_periodic_trimming(interval_secs: u64) {
     std::thread::spawn(move || {
-        // Wait 60 seconds before first trim to avoid interfering with WebView2 startup
-        for _ in 0..60 {
-            if !crate::overlay::OVERLAY_THREAD_RUNNING.load(std::sync::atomic::Ordering::SeqCst) {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_secs(1));
-        }
         while crate::overlay::OVERLAY_THREAD_RUNNING.load(std::sync::atomic::Ordering::SeqCst) {
             std::thread::sleep(std::time::Duration::from_secs(interval_secs));
             trim_webview_processes();

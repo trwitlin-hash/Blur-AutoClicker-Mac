@@ -1,108 +1,84 @@
-<div align="center">
-  <p align="center">
-    <a href="https://github.com/Blur009/Blur-AutoClicker/releases"><img src="https://img.shields.io/github/downloads/Blur009/Blur-AutoClicker/total?style=for-the-badge&label=downloads" alt="Downloads"></a>
-    <img src="https://img.shields.io/github/package-json/v/Blur009/Blur-AutoClicker?style=for-the-badge&label=version" alt="Version">
-    <img src="https://img.shields.io/github/license/Blur009/Blur-AutoClicker?style=for-the-badge" alt="License">
-    <img src="https://img.shields.io/github/stars/Blur009/Blur-AutoClicker?style=for-the-badge&label=stars" alt="Stars">
-    <a href="https://discord.gg/jhWEW747x5"><img src="https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Discord"></a>
-  </p>
+# BlurAutoClicker — macOS (Apple Silicon)
 
-  
+A macOS port of [Blur009/Blur-AutoClicker](https://github.com/Blur009/Blur-AutoClicker),
+tracking upstream **v3.9.6**.
 
-  # Blur Auto Clicker
+> **Modification notice (GPL-3.0 §5a).** This is a modified version of
+> BlurAutoClicker. The Windows-only input layer was replaced with a macOS
+> CoreGraphics implementation, and the build was retargeted to
+> `aarch64-apple-darwin`. Modified on **2026-09-05**, based on upstream tag
+> `v3.9.6`. Upstream is unmodified in all other respects, and all Windows code
+> is preserved behind `#[cfg(target_os = "windows")]`.
 
+Upstream is Windows-only by design — the author has
+[declined to support macOS](https://github.com/Blur009/Blur-AutoClicker/pull/214)
+("I do not own a macbook of any kind"). This fork exists to fill that gap.
 
-  <img src="https://github.com/Blur009/Blur-AutoClicker/blob/main/public/V3.0.0_UI.png" width="600"/>
+## Install
 
-  <p align="center"><em>An auto clicker that actually clicks at the speed you set.</em></p>
-  
-  <a href="https://ko-fi.com/blur009">
-    <img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Donate on Ko-fi" width="350">
-  </a>
+Download the `.dmg` from Releases, drag the app to **Applications**, then:
 
-  ---
+```bash
+# ad-hoc signed, so Gatekeeper needs the quarantine flag cleared
+xattr -cr /Applications/BlurAutoClicker.app
+```
 
-  <a href="#features">Features</a> ·
-  <a href="#quick-start">Quick Start</a> ·
-  <a href="#faq">FAQ</a> ·
-  <a href="#license">License</a>
-  
-  
+Or right-click the app → **Open** on first launch.
 
-</div>
+### Accessibility permission is required
 
----
-Most auto clickers aren't accurate at high speeds. Set it to 50 CPS and you might get 40. Or 60. This one actually hits the speed you set. It also bundles the useful features from other auto clickers into one place, and adds a few extras. RAM is around 100mb and stays under 200mb (yes its a lot but sadly it cant be reduced due to Webview2).
+macOS silently discards synthetic events from untrusted processes — the app will
+run and count clicks while none of them land.
 
----
+1. **System Settings → Privacy & Security → Accessibility**
+2. Enable **BlurAutoClicker**
+3. **Quit and relaunch** — the event tap is only created at startup
 
-## Features
+The grant is bound to the app's code signature, so after any rebuild you must
+remove the stale entry with **−** and re-add it.
 
-**Simple Mode:**
-- On/off indicator (logo turns green when running)
-- Left, right, or middle mouse button
-- Keyboard key pressing with case control
-- Hold or toggle activation
-- Customizable hotkeys
+## What changed from upstream
 
-**Advanced Mode** (everything in Simple, plus):
-- Adjustable click timing (duty cycle)
-- Random CPS within a range
-- Corner and edge stopping (auto-off near screen edges)
-- Click and time limits
-- Double clicks
-- Position clicking (pick a spot, mouse moves and clicks there)
-- Per second, minute, hour, or day
+| Concern | Windows (upstream) | macOS (this fork) |
+| --- | --- | --- |
+| Click / key injection | `SendInput` | `CGEventPost` + `CGEventCreateMouseEvent` / `…KeyboardEvent` |
+| Global hotkey capture | `SetWindowsHookExW` (`WH_KEYBOARD_LL`) | `CGEventTap` on its own CFRunLoop |
+| Modifier state | `GetAsyncKeyState` | `CGEventSourceKeyState` — modifiers emit `NX_FLAGSCHANGED`, which the tap never sees |
+| Cursor-over-own-window | `WindowFromPoint` + PID compare | Tauri window rect vs. cursor position |
+| Key auto-repeat | `SystemParametersInfoW` | `defaults read -g InitialKeyRepeat` / `KeyRepeat`, cached |
+| Function keys | `VK_F1 + (n-1)`, contiguous | lookup table — macOS F-key codes are **not** contiguous |
+| Settings / stats path | `%APPDATA%` | `~/Library/Application Support/BlurAutoClicker` |
+| Modifier labels | `Ctrl` / `Alt` / `Super` | `⌃` / `⌥` / `⌘` |
 
+Known no-ops on macOS: `disableScreenshots` (relies on `SetWindowDisplayAffinity`),
+Crashpad (no prebuilt macOS artifact), and the auto-updater (upstream publishes no
+macOS artifact, so its check is inert by design rather than offering a Windows
+installer).
 
-## Quick Start
+See [PORTING-NOTES.md](PORTING-NOTES.md) for the full method, including the
+three-way merge used and the required post-build re-signing step.
 
-<a href="https://github.com/Blur009/Blur-AutoClicker/releases/latest">
-  <img src="https://github.com/machiav3lli/oandbackupx/blob/034b226cea5c1b30eb4f6a6f313e4dadcbb0ece4/badge_github.png" alt="Download from GitHub" height="50">
-</a>
+## Building
 
-Installed to `%localappdata%/BlurAutoClicker/BlurAutoClicker.exe`.  
-Config and stats are saved in `%appdata%/BlurAutoClicker`.
+```bash
+npm install
+npm run tauri -- build --target aarch64-apple-darwin
+```
 
-> On version 2.1.2 or below? Delete the old executable first — the installer won't do it. Old configs won't work with v3+, they'll be deleted on first launch.
+Tauri ad-hoc signs the binary but does not seal the bundle, so re-sign afterwards:
 
----
+```bash
+codesign --force --deep --sign - \
+  --entitlements src-tauri/entitlements.plist \
+  /Applications/BlurAutoClicker.app
+```
 
-## FAQ
+## Credits
 
-<details>
-<summary><b>Why is CPS capped at 500?</b></summary>
-
-Windows has a limit of around 500 CPS for mouse events. The timer resolution bottoms out at about 1ms (1000 CPS), but Windows also needs to do other things, so the practical limit is around 800 CPS. Since I can't guarantee that on every machine, it's set to 500. (A 1000 cps setting is available but not recommended.)
-</details>
-
-<details>
-<summary><b>Windows SmartScreen warning?</b></summary>
-
-The installer isn't signed, so Windows may show a SmartScreen warning. Tauri updater signing is separate from Windows Authenticode signing. See <a href="docs/windows-release-trust.md">docs/windows-release-trust.md</a> for details.
-</details>
-
-<details>
-<summary><b>Can I build from source?</b></summary>
-
-Yes — see <a href="BUILDING.md">BUILDING.md</a> for setup, build, and validation commands. For contributing guidelines, see <a href="CONTRIBUTING.md">CONTRIBUTING.md</a>.
-</details>
-
----
+- [Blur009](https://github.com/Blur009/Blur-AutoClicker) — the original application
+- [Djozman/Blur-AutoClickerMAC](https://github.com/Djozman/Blur-AutoClickerMAC) —
+  the 3.9.1 macOS port used as the reference for the CoreGraphics layer
 
 ## License
 
-Licensed under the [GNU General Public License](LICENSE).
-
-## Note
-This project has been accepted into Windows Package Manager (winget). You can install it with the command:
-
-```powershell
-winget install -e --id Blur009.BlurAutoClicker --source winget --silent
-```
----
-It has also been accepted into **Chris Titus Tech's winutils**.
-https://github.com/ChrisTitusTech/winutil/pull/4383
-
----
-This project is not code signed, so Windows may show a SmartScreen warning. See [microsoft](https://learn.microsoft.com/en-us/windows/security/operating-system-security/virus-and-threat-protection/microsoft-defender-smartscreen/) for information on SmartScreen. Importantly, a SmartScreen warning does not mean the software is malicious, it just means it is not code signed which is an expensive process.
+GPL-3.0, inherited from upstream. See [LICENSE](LICENSE).

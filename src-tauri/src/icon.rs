@@ -331,6 +331,7 @@ impl IconBackend for TraySink {
 }
 
 #[cfg(windows)]
+#[cfg(target_os = "windows")]
 fn force_window_icon_big(window: &tauri::WebviewWindow, img: &RgbaImage) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         DestroyIcon, SendMessageW, ICON_BIG, ICON_SMALL, WM_SETICON,
@@ -374,6 +375,7 @@ fn force_window_icon_big(window: &tauri::WebviewWindow, img: &RgbaImage) {
 
 // Premultiply straight RGBA (as the `image` crate stores it) into the BGRA
 // byte order Windows icon bitmaps require, with alpha premultiplied.
+#[cfg(any(target_os = "windows", test))]
 fn premultiply_rgba_to_bgra(raw: &[u8]) -> Vec<u8> {
     let mut px = Vec::with_capacity(raw.len());
     for p in raw.chunks_exact(4) {
@@ -390,6 +392,7 @@ fn premultiply_rgba_to_bgra(raw: &[u8]) -> Vec<u8> {
 // (BITMAPV5HEADER + BI_BITFIELDS + alpha mask). Negative height = top-down
 // DIB, matching the `image` crate's row 0 = top ordering.
 #[cfg(windows)]
+#[cfg(target_os = "windows")]
 fn rgba_to_hicon(img: &RgbaImage) -> Option<windows_sys::Win32::UI::WindowsAndMessaging::HICON> {
     use windows_sys::Win32::Graphics::Gdi::{
         CreateBitmap, CreateDIBSection, DeleteObject, GetDC, ReleaseDC, BITMAPV5HEADER,

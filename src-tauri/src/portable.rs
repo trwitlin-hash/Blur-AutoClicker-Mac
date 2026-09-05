@@ -239,6 +239,8 @@ mod tests {
         assert!(!detect_marker(temp.path()));
     }
 
+    /// Hardcoded Windows paths; separators differ on other platforms.
+    #[cfg(target_os = "windows")]
     #[test]
     fn layout_resolves_under_exe_data() {
         let exe_dir = std::path::Path::new(r"C:\apps\Blur");

@@ -127,6 +127,8 @@ mod tests {
         assert_eq!(exports_dir().unwrap(), root.join("Exports"));
     }
 
+    /// Hardcoded Windows paths; separators differ on other platforms.
+    #[cfg(target_os = "windows")]
     #[test]
     fn portable_layout_resolves_single_level() {
         let exe_dir = std::path::Path::new(r"C:\apps\Blur");

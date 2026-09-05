@@ -151,10 +151,10 @@ export type HotkeyDisplayLabels = {
 export const defaultHotkeyLabels: HotkeyDisplayLabels = {
   empty: "No hotkey set",
   modifiers: {
-    ctrl: "Ctrl",
-    alt: "Alt",
-    shift: "Shift",
-    super: "Super",
+    ctrl: "⌃",
+    alt: "⌥",
+    shift: "⇧",
+    super: "⌘",
   },
   keys: {
     up: "Up",
@@ -179,14 +179,14 @@ export const defaultHotkeyLabels: HotkeyDisplayLabels = {
     printscreen: "Print Screen",
     pause: "Pause",
     menu: "Menu",
-    leftctrl: "Left Ctrl",
-    rightctrl: "Right Ctrl",
-    leftshift: "Left Shift",
-    rightshift: "Right Shift",
-    leftalt: "Left Alt",
-    rightalt: "Right Alt",
-    leftsuper: "Left Super",
-    rightsuper: "Right Super",
+    leftctrl: "Left ⌃",
+    rightctrl: "Right ⌃",
+    leftshift: "Left ⇧",
+    rightshift: "Right ⇧",
+    leftalt: "Left ⌥",
+    rightalt: "Right ⌥",
+    leftsuper: "Left ⌘",
+    rightsuper: "Right ⌘",
     mouseleft: "Mouse Left",
     mouseright: "Mouse Right",
     mousemiddle: "Scroll Button",
@@ -590,14 +590,14 @@ function displayTokenFromStoredValue(
     printscreen: "Print Screen",
     pause: "Pause",
     menu: "Menu",
-    leftctrl: "Left Ctrl",
-    rightctrl: "Right Ctrl",
-    leftshift: "Left Shift",
-    rightshift: "Right Shift",
-    leftalt: "Left Alt",
-    rightalt: "Right Alt",
-    leftsuper: "Left Super",
-    rightsuper: "Right Super",
+    leftctrl: "Left ⌃",
+    rightctrl: "Right ⌃",
+    leftshift: "Left ⇧",
+    rightshift: "Right ⇧",
+    leftalt: "Left ⌥",
+    rightalt: "Right ⌥",
+    leftsuper: "Left ⌘",
+    rightsuper: "Right ⌘",
     numpadadd: "Num +",
     numpadsubtract: "Num -",
     numpadmultiply: "Num *",
@@ -746,10 +746,10 @@ export function formatHotkeyForDisplay(
       const aliasCanonical = normalizeNamedKey(lower) ?? lower;
       const modifier = normalizeModifierToken(aliasCanonical);
       if (modifier) {
-        if (modifier === "ctrl") return labels?.modifiers.ctrl ?? "Ctrl";
-        if (modifier === "alt") return labels?.modifiers.alt ?? "Alt";
-        if (modifier === "shift") return labels?.modifiers.shift ?? "Shift";
-        return labels?.modifiers.super ?? "Super";
+        if (modifier === "ctrl") return labels?.modifiers.ctrl ?? "⌃";
+        if (modifier === "alt") return labels?.modifiers.alt ?? "⌥";
+        if (modifier === "shift") return labels?.modifiers.shift ?? "⇧";
+        return labels?.modifiers.super ?? "⌘";
       }
 
       const display = displayTokenFromStoredValue(

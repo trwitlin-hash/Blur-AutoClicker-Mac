@@ -8,7 +8,6 @@
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "npm run vite",
     "beforeBuildCommand": "npm run frontend:build",
-    "beforeBundleCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-windows-redist.ps1",
     "removeUnusedCommands": true
   },
   "app": {
@@ -22,7 +21,8 @@
           "allow": []
         }
       }
-    }
+    },
+    "macOSPrivateApi": true
   },
   "plugins": {
     "updater": {
@@ -34,19 +34,22 @@
   },
   "bundle": {
     "active": true,
-    "targets": "nsis",
-    "createUpdaterArtifacts": true,
+    "targets": [
+      "app",
+      "dmg"
+    ],
+    "createUpdaterArtifacts": false,
     "publisher": "Blur009",
     "copyright": "Copyright (c) Blur009",
     "category": "Utility",
     "shortDescription": "Configurable auto clicker with accurate CPS timing.",
     "longDescription": "Performance-focused auto clicker with global hotkeys, optional overlay, and advanced timing. Licensed under GPLv3.",
     "homepage": "https://github.com/Blur009/Blur-AutoClicker",
-    "resources": {
-      "resources/*": ""
-    },
     "icon": [
-      "icons/icon-deactivated-dark.ico"
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns"
     ],
     "windows": {
       "webviewInstallMode": {
@@ -57,6 +60,11 @@
         "compression": "lzma",
         "installerIcon": "icons/icon-deactivated-dark.ico"
       }
+    },
+    "macOS": {
+      "minimumSystemVersion": "12.0",
+      "entitlements": "entitlements.plist",
+      "infoPlist": "Info.plist"
     }
   }
 }

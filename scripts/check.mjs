@@ -104,13 +104,21 @@ async function guardRunningInstance() {
     const out = r.stdout || '';
     running = /BlurAutoClicker/i.test(out) || /crashpad_handler/i.test(out);
   } else {
-    const r = spawnSync('pgrep', ['-f', 'BlurAutoClicker|crashpad_handler'], {
-      encoding: 'utf8',
-    });
+    // Match the built app's executable path specifically. A bare
+    // "BlurAutoClicker" pattern also matches this checker itself, because the
+    // repo path contains that string.
+    const r = spawnSync(
+      'pgrep',
+      ['-f', 'BlurAutoClicker\\.app/Contents/MacOS/BlurAutoClicker'],
+      { encoding: 'utf8' },
+    );
     running = r.status === 0 && !!r.stdout.trim();
   }
 
-  if (!running) {
+  // crashpad_handler.exe is a Windows-only staged resource, so the file-lock
+  // probe is meaningless elsewhere - and its absence would report a false
+  // positive.
+  if (!running && process.platform === 'win32') {
     try {
       const { openSync, closeSync } = await import('node:fs');
       const { resolve } = await import('node:path');

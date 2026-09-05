@@ -3,8 +3,6 @@ use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::Mutex;
 use std::sync::OnceLock;
-
-use crate::error::poisoned_inner;
 use windows_sys::Win32::Foundation::{CloseHandle, HWND, INVALID_HANDLE_VALUE, LPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetObjectW, SelectObject, BITMAP,
@@ -25,7 +23,6 @@ use image::ImageEncoder;
 
 const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
 const DI_NORMAL: u32 = 0x0003;
-const PROCESS_DISPLAY_TITLE_MAX_CHARS: usize = 35;
 
 extern "system" {
     fn QueryFullProcessImageNameW(
@@ -176,13 +173,13 @@ fn extract_process_icon_base64(exe_path: &str) -> Option<String> {
 
 fn get_icon_for_process(exe_name: &str, pid: u32) -> Option<String> {
     {
-        let cache = icon_cache().lock().unwrap_or_else(poisoned_inner);
+        let cache = icon_cache().lock().unwrap();
         if let Some(cached) = cache.get(exe_name) {
             return cached.clone();
         }
     }
     let icon = get_process_exe_path(pid).and_then(|path| extract_process_icon_base64(&path));
-    let mut cache = icon_cache().lock().unwrap_or_else(poisoned_inner);
+    let mut cache = icon_cache().lock().unwrap();
     cache.insert(exe_name.to_string(), icon.clone());
     icon
 }
@@ -259,6 +256,8 @@ fn build_pid_title_map() -> HashMap<u32, String> {
     }
     state.map
 }
+
+const PROCESS_DISPLAY_TITLE_MAX_CHARS: usize = 45;
 
 fn truncate_title_for_display(title: &str) -> String {
     match title.char_indices().nth(PROCESS_DISPLAY_TITLE_MAX_CHARS) {
@@ -340,7 +339,7 @@ pub fn list_running_processes() -> Vec<ProcessInfo> {
     result
 }
 
-pub fn check_process_list(config: &ClickerConfig) -> Option<()> {
+pub fn check_process_list(config: &ClickerConfig) -> Option<super::ProcessListBehavior> {
     if !config.process_list_enabled {
         return None;
     }
@@ -355,7 +354,11 @@ pub fn check_process_list(config: &ClickerConfig) -> Option<()> {
         super::ProcessListMode::Blacklist => is_in_list,
     };
     if triggered {
-        Some(())
+        let behavior = match matching_entry {
+            Some(entry) => entry.behavior,
+            None => super::ProcessListBehavior::Stop,
+        };
+        Some(behavior)
     } else {
         None
     }
@@ -387,32 +390,6 @@ pub fn is_task_switcher_active() -> bool {
     let tab_down = unsafe { (GetAsyncKeyState(VK_TAB as i32) as u16 & 0x8000) != 0 };
     alt_down && tab_down
 }
-
-pub fn is_process_running(name: &str) -> bool {
-    let target = normalize_process_name(name);
-    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
-    if snapshot == INVALID_HANDLE_VALUE {
-        return false;
-    }
-    let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
-    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
-    let mut found = false;
-    if unsafe { Process32FirstW(snapshot, &mut entry) } != 0 {
-        loop {
-            let exe_name = wide_array_to_string(&entry.szExeFile);
-            if !exe_name.is_empty() && exe_name.to_lowercase() == target {
-                found = true;
-                break;
-            }
-            if unsafe { Process32NextW(snapshot, &mut entry) } == 0 {
-                break;
-            }
-        }
-    }
-    unsafe { CloseHandle(snapshot) };
-    found
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,16 +404,10 @@ mod tests {
 
     #[test]
     fn truncate_title_handles_multibyte_at_old_byte_boundary() {
-        let title = format!(
-            "{}Тест, привіт, дякую",
-            "a".repeat(PROCESS_DISPLAY_TITLE_MAX_CHARS - 1)
-        );
+        let title = format!("{}Тест, привіт, дякую", "a".repeat(44));
         let truncated = truncate_title_for_display(&title);
 
-        assert_eq!(
-            truncated,
-            format!("{}Т", "a".repeat(PROCESS_DISPLAY_TITLE_MAX_CHARS - 1))
-        );
+        assert_eq!(truncated, format!("{}Т", "a".repeat(44)));
         assert!(truncated.is_char_boundary(truncated.len()));
     }
 

@@ -2,12 +2,17 @@ pub mod cycle;
 pub mod failsafe;
 pub mod keyboard;
 pub mod mouse;
+#[cfg(target_os = "windows")]
+pub mod process;
+#[cfg(not(target_os = "windows"))]
+#[path = "process_stub.rs"]
 pub mod process;
 pub mod rng;
 pub mod stats;
 pub mod worker;
 use std::sync::atomic::AtomicI64;
 pub use worker::start_clicker;
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub const AUTOCLICKER_EXTRA_INFO: usize = 0x800D_A5A5; //Just a random Identifier
 use self::mouse::VirtualScreenRect;
 
@@ -105,11 +110,18 @@ pub struct RunOutcome {
 }
 static CLICK_COUNT: AtomicI64 = AtomicI64::new(0);
 
+#[cfg(target_os = "windows")]
 #[link(name = "ntdll")]
 extern "system" {
-    fn NtSetTimerResolution(
+    pub fn NtSetTimerResolution(
         DesiredResolution: u32,
         SetResolution: u8,
         CurrentResolution: *mut u32,
     ) -> u32;
+}
+
+#[cfg(not(target_os = "windows"))]
+#[allow(dead_code, non_snake_case)]
+pub unsafe fn NtSetTimerResolution(_desired: u32, _set: u8, _current: *mut u32) -> u32 {
+    0
 }

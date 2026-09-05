@@ -13,7 +13,9 @@ use crate::ClickerSettings;
 use crate::ClickerState;
 use crate::ClickerStatusPayload;
 use crate::STATUS_EVENT;
+#[cfg(target_os = "windows")]
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime;
+#[cfg(target_os = "windows")]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     SystemParametersInfoW, SPI_GETKEYBOARDDELAY, SPI_GETKEYBOARDSPEED,
 };
@@ -30,6 +32,7 @@ use super::process;
 use super::rng::SmallRng;
 use super::ClickPointTarget;
 use super::ClickerConfig;
+#[cfg(target_os = "windows")]
 use super::NtSetTimerResolution;
 use super::RunOutcome;
 use super::CLICK_COUNT;
@@ -38,13 +41,16 @@ use super::CLICK_COUNT;
 // changed from normal cpu measurement because it was not accurately
 // showing cpu usage for short clicker run times.
 
+#[cfg(target_os = "windows")]
 windows_targets::link!(
     "kernel32.dll" "system" fn QueryThreadCycleTime(thread: *mut core::ffi::c_void, cycles: *mut u64) -> i32
 );
+#[cfg(target_os = "windows")]
 windows_targets::link!(
     "kernel32.dll" "system" fn GetCurrentThread() -> *mut core::ffi::c_void
 );
 
+#[cfg(target_os = "windows")]
 #[inline]
 fn thread_cycles() -> u64 {
     let mut cycles: u64 = 0;
@@ -58,6 +64,38 @@ impl ClickerConfig {
     pub fn use_click_points(&self) -> bool {
         self.click_points_enabled && !self.click_points.is_empty()
     }
+}
+
+#[cfg(not(target_os = "windows"))]
+#[repr(C)]
+struct ThreadCpuTimespec {
+    tv_sec: i64,
+    tv_nsec: i64,
+}
+
+#[cfg(not(target_os = "windows"))]
+unsafe extern "C" {
+    fn clock_gettime(clock_id: i32, tp: *mut ThreadCpuTimespec) -> i32;
+}
+
+#[cfg(not(target_os = "windows"))]
+#[inline]
+fn thread_cycles() -> u64 {
+    const CLOCK_THREAD_CPUTIME_ID: i32 = 16;
+    let mut value = ThreadCpuTimespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+
+    let result = unsafe { clock_gettime(CLOCK_THREAD_CPUTIME_ID, &mut value) };
+
+    if result != 0 {
+        return 0;
+    }
+
+    (value.tv_sec.max(0) as u64)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(value.tv_nsec.max(0) as u64)
 }
 
 fn calibrate_cycle_freq() -> f64 {
@@ -80,8 +118,10 @@ fn calibrate_cycle_freq() -> f64 {
     }
 }
 
+#[cfg(target_os = "windows")]
 struct TimerResolutionGuard;
 
+#[cfg(target_os = "windows")]
 impl TimerResolutionGuard {
     fn new() -> Self {
         let mut current = 0u32;
@@ -97,6 +137,7 @@ impl TimerResolutionGuard {
     }
 }
 
+#[cfg(target_os = "windows")]
 impl Drop for TimerResolutionGuard {
     fn drop(&mut self) {
         let mut current = 0u32;
@@ -143,7 +184,7 @@ pub fn start_clicker_inner(app: &AppHandle) -> AppResult<ClickerStatusPayload> {
     let config = build_config(&settings)?;
 
     // Prevent feedback loop: keyboard key must not match a modifier-free hotkey
-    if config.input_type == crate::engine::InputType::Keyboard && config.key_code > 0 {
+    if config.input_type == crate::engine::InputType::Keyboard {
         let hotkey_binding = state
             .registered_hotkey
             .lock()
@@ -287,8 +328,16 @@ fn interval_secs_from_settings(settings: &ClickerSettings) -> AppResult<f64> {
 }
 
 fn system_double_click_gap_ms() -> u32 {
-    let system_timeout_ms = unsafe { GetDoubleClickTime() };
-    ((system_timeout_ms as f64) * 0.9).floor() as u32
+    #[cfg(target_os = "windows")]
+    {
+        let system_timeout_ms = unsafe { GetDoubleClickTime() };
+        return ((system_timeout_ms as f64) * 0.9).floor() as u32;
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        450
+    }
 }
 
 fn current_cycle_target(config: &ClickerConfig, click_point_index: usize) -> ClickPointTarget {
@@ -316,19 +365,24 @@ pub fn build_config(settings: &ClickerSettings) -> AppResult<ClickerConfig> {
     };
 
     let is_keyboard = settings.input_type == "keyboard";
-    let key_code = if is_keyboard && !settings.keyboard_key.is_empty() {
+
+    let key_code_option = if is_keyboard {
+        if settings.keyboard_key.is_empty() {
+            return Err(AppError::NoKeySelected);
+        }
+
         match crate::hotkeys::parse_hotkey_main_key(&settings.keyboard_key, &settings.keyboard_key)
         {
-            Ok((vk, _)) => vk as u16,
+            Ok((vk, _)) => Some(vk as u16),
             Err(_) => return Err(AppError::UnknownKey(settings.keyboard_key.clone())),
         }
     } else {
-        0u16
+        None
     };
 
-    if is_keyboard && key_code == 0 {
-        return Err(AppError::NoKeySelected);
-    }
+    // macOS key code 0 is the letter A, so zero cannot represent
+    // "no key selected". InputType identifies whether this is keyboard mode.
+    let key_code = key_code_option.unwrap_or(0);
     let keyboard_uppercase =
         is_keyboard && settings.keyboard_key_case == "upper" && is_alphabetic_vk(key_code);
 
@@ -548,6 +602,31 @@ struct ClickerContext {
     double_plan: ClickCyclePlan,
 }
 
+/// macOS keeps the equivalent settings in the global domain, in units of
+/// ~15 ms. Read once and cache; fall back to the factory defaults.
+#[cfg(target_os = "macos")]
+fn get_keyboard_repeat_settings() -> (u32, u32) {
+    use std::sync::OnceLock;
+    static SETTINGS: OnceLock<(u32, u32)> = OnceLock::new();
+    *SETTINGS.get_or_init(|| {
+        fn read(key: &str, default: f64) -> f64 {
+            std::process::Command::new("defaults")
+                .args(["read", "-g", key])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .and_then(|s| s.trim().parse::<f64>().ok())
+                .unwrap_or(default)
+        }
+        const TICK_MS: f64 = 15.0;
+        let delay = (read("InitialKeyRepeat", 25.0) * TICK_MS).round() as u32;
+        let interval = (read("KeyRepeat", 6.0) * TICK_MS).round() as u32;
+        (delay.max(1), interval.max(1))
+    })
+}
+
+#[cfg(target_os = "windows")]
 fn get_keyboard_repeat_settings() -> (u32, u32) {
     // SPI_GETKEYBOARDDELAY: 0=250ms, 1=500ms, 2=750ms, 3=1000ms
     let mut delay_setting: u32 = 0;
@@ -590,7 +669,13 @@ fn get_keyboard_repeat_settings() -> (u32, u32) {
 
 impl ClickerContext {
     fn new(config: &ClickerConfig) -> Self {
+        // Windows uses key_code 0 as the "no key selected" sentinel. On macOS
+        // CGKeyCode 0 is the letter A, so the sentinel cannot apply there;
+        // build_config already rejects an empty key with NoKeySelected.
+        #[cfg(target_os = "windows")]
         let is_keyboard = config.input_type.is_keyboard() && config.key_code > 0;
+        #[cfg(not(target_os = "windows"))]
+        let is_keyboard = config.input_type.is_keyboard();
         let (down_flag, up_flag) = if is_keyboard {
             (0, 0)
         } else {
@@ -885,6 +970,7 @@ fn cpu_usage(start_cycles: u64, cycle_freq: f64, elapsed_secs: f64) -> f64 {
 
 pub fn start_clicker(config: ClickerConfig, control: RunControl) -> RunOutcome {
     CLICK_COUNT.store(0, Ordering::SeqCst);
+    #[cfg(target_os = "windows")]
     let _timer = TimerResolutionGuard::new();
 
     let cycle_freq = calibrate_cycle_freq();
@@ -1259,12 +1345,23 @@ mod tests {
         settings.keyboard_key_case = "upper".to_string();
 
         let config = build_config(&settings).expect("letter key should parse");
+        #[cfg(target_os = "windows")]
         assert_eq!(config.key_code, b'A' as u16);
+
+        #[cfg(target_os = "macos")]
+        assert_eq!(config.key_code, 0);
+
         assert!(config.keyboard_uppercase);
 
         settings.keyboard_key = "1".to_string();
         let config = build_config(&settings).expect("digit key should parse");
+
+        #[cfg(target_os = "windows")]
         assert_eq!(config.key_code, b'1' as u16);
+
+        #[cfg(target_os = "macos")]
+        assert_eq!(config.key_code, 18);
+
         assert!(!config.keyboard_uppercase);
     }
 
@@ -1305,6 +1402,8 @@ mod tests {
         assert!(!ctx.keyboard_hold_mode);
     }
 
+    /// key_code 0 is only a "no key" sentinel on Windows; on macOS it is A.
+    #[cfg(target_os = "windows")]
     #[test]
     fn keyboard_no_key_code_no_hold_mode() {
         let mut config = sample_config();

@@ -3,6 +3,7 @@ use crate::engine::worker::now_epoch_ms;
 use crate::engine::worker::start_clicker_inner;
 use crate::engine::worker::stop_clicker_inner;
 use crate::engine::worker::toggle_clicker_inner;
+#[cfg(target_os = "windows")]
 use crate::engine::AUTOCLICKER_EXTRA_INFO;
 use crate::error::poisoned_inner;
 use crate::error::AppError;
@@ -14,9 +15,13 @@ use std::sync::OnceLock;
 use std::time::Duration;
 use std::time::Instant;
 use tauri::Manager;
+#[cfg(target_os = "windows")]
 use windows_sys::Win32::Foundation::{GetLastError, LRESULT, POINT};
+#[cfg(target_os = "windows")]
 use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+#[cfg(target_os = "windows")]
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
+#[cfg(target_os = "windows")]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetAncestor, GetCursorPos, GetWindowThreadProcessId, PeekMessageW,
     SetWindowsHookExW, UnhookWindowsHookEx, WaitMessage, WindowFromPoint, GA_ROOT, KBDLLHOOKSTRUCT,
@@ -25,7 +30,17 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_SYSKEYDOWN, WM_XBUTTONDOWN, WM_XBUTTONUP,
 };
 
+#[cfg(target_os = "macos")]
+#[path = "hotkeys_macos.rs"]
+mod macos_support;
+#[cfg(target_os = "macos")]
+use macos_support::vk_codes::*;
+#[cfg(target_os = "macos")]
+use macos_support::{macos_event_tap, macos_input};
+
+#[cfg(target_os = "windows")]
 const PM_REMOVE: u32 = 0x0001;
+#[cfg(target_os = "windows")]
 const PM_NOREMOVE: u32 = 0x0000;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(4);
@@ -259,6 +274,74 @@ pub fn parse_hotkey_binding(hotkey: &str) -> AppResult<HotkeyBinding> {
     })
 }
 
+/// On Windows, VK_A..VK_Z equal the ASCII uppercase value.
+#[cfg(target_os = "windows")]
+fn letter_to_vk(ch: char) -> Option<i32> {
+    Some(ch.to_ascii_uppercase() as i32)
+}
+
+/// On macOS, letters are CGKeyCodes for ANSI US layout *positions*, which are
+/// not alphabetical.
+#[cfg(target_os = "macos")]
+fn letter_to_vk(ch: char) -> Option<i32> {
+    let code: u16 = match ch {
+        'a' => 0x00,
+        's' => 0x01,
+        'd' => 0x02,
+        'f' => 0x03,
+        'h' => 0x04,
+        'g' => 0x05,
+        'z' => 0x06,
+        'x' => 0x07,
+        'c' => 0x08,
+        'v' => 0x09,
+        'b' => 0x0B,
+        'q' => 0x0C,
+        'w' => 0x0D,
+        'e' => 0x0E,
+        'r' => 0x0F,
+        'y' => 0x10,
+        't' => 0x11,
+        'o' => 0x1F,
+        'u' => 0x20,
+        'i' => 0x22,
+        'p' => 0x23,
+        'l' => 0x25,
+        'j' => 0x26,
+        'k' => 0x28,
+        'n' => 0x2D,
+        'm' => 0x2E,
+        _ => return None,
+    };
+    Some(code as i32)
+}
+
+/// On Windows the digit VKs equal their ASCII value.
+#[cfg(target_os = "windows")]
+fn digit_to_vk(ch: char) -> Option<i32> {
+    Some(ch as i32)
+}
+
+/// On macOS digits have their own CGKeyCodes (and 5/6 and 7/8/9 are not in
+/// numeric order).
+#[cfg(target_os = "macos")]
+fn digit_to_vk(ch: char) -> Option<i32> {
+    let code: u16 = match ch {
+        '1' => 0x12,
+        '2' => 0x13,
+        '3' => 0x14,
+        '4' => 0x15,
+        '6' => 0x16,
+        '5' => 0x17,
+        '9' => 0x19,
+        '7' => 0x1A,
+        '8' => 0x1C,
+        '0' => 0x1D,
+        _ => return None,
+    };
+    Some(code as i32)
+}
+
 pub fn parse_hotkey_main_key(token: &str, original_hotkey: &str) -> AppResult<(i32, String)> {
     let lower = token.trim().to_ascii_lowercase();
 
@@ -291,12 +374,22 @@ pub fn parse_hotkey_main_key(token: &str, original_hotkey: &str) -> AppResult<(i
     }
 
     if lower.len() == 1 {
-        let ch = lower.as_bytes()[0];
+        let ch = lower.as_bytes()[0] as char;
         if ch.is_ascii_lowercase() {
-            return Ok((ch.to_ascii_uppercase() as i32, lower));
+            let vk = letter_to_vk(ch).ok_or_else(|| {
+                AppError::Hotkey(format!(
+                    "Couldn't recognize '{token}' as a valid key in '{original_hotkey}'"
+                ))
+            })?;
+            return Ok((vk, lower));
         }
         if ch.is_ascii_digit() {
-            return Ok((ch as i32, lower));
+            let vk = digit_to_vk(ch).ok_or_else(|| {
+                AppError::Hotkey(format!(
+                    "Couldn't recognize '{token}' as a valid key in '{original_hotkey}'"
+                ))
+            })?;
+            return Ok((vk, lower));
         }
     }
 
@@ -351,14 +444,17 @@ pub fn format_hotkey_binding(binding: &HotkeyBinding) -> String {
     parts.join("+")
 }
 
+#[cfg(target_os = "windows")]
 static PHYSICAL_KEY_STATE: OnceLock<&'static [AtomicBool; 256]> = OnceLock::new();
 static HOOKS_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+#[cfg(target_os = "windows")]
 fn physical_key_state() -> &'static [AtomicBool; 256] {
     PHYSICAL_KEY_STATE
         .get_or_init(|| Box::leak(Box::new(std::array::from_fn(|_| AtomicBool::new(false)))))
 }
 
+#[cfg(target_os = "windows")]
 fn is_physical_vk_down(vk: i32) -> bool {
     if !(0..256).contains(&vk) {
         return false;
@@ -366,6 +462,15 @@ fn is_physical_vk_down(vk: i32) -> bool {
     physical_key_state()[vk as usize].load(Ordering::Relaxed)
 }
 
+/// On macOS the CGEventTap *is* the physical key source (and modifiers come
+/// straight from the HID state), so the physical query is the same as the
+/// regular one.
+#[cfg(target_os = "macos")]
+fn is_physical_vk_down(vk: i32) -> bool {
+    is_vk_down(vk)
+}
+
+#[cfg(target_os = "windows")]
 fn normalize_low_level_keyboard_vk(khs: &KBDLLHOOKSTRUCT) -> i32 {
     match khs.vkCode as u16 {
         VK_SHIFT => {
@@ -394,6 +499,7 @@ fn normalize_low_level_keyboard_vk(khs: &KBDLLHOOKSTRUCT) -> i32 {
     }
 }
 
+#[cfg(target_os = "windows")]
 unsafe extern "system" fn mouse_ll_proc(n_code: i32, w_param: usize, l_param: isize) -> LRESULT {
     if n_code >= 0 {
         let mhs = &*(l_param as *const MSLLHOOKSTRUCT);
@@ -431,6 +537,7 @@ unsafe extern "system" fn mouse_ll_proc(n_code: i32, w_param: usize, l_param: is
     CallNextHookEx(std::ptr::null_mut(), n_code, w_param, l_param)
 }
 
+#[cfg(target_os = "windows")]
 unsafe extern "system" fn keyboard_ll_proc(n_code: i32, w_param: usize, l_param: isize) -> LRESULT {
     if n_code >= 0 {
         let khs = &*(l_param as *const KBDLLHOOKSTRUCT);
@@ -454,20 +561,49 @@ pub fn start_hotkey_listener(app: AppHandle) {
         // during this window.
         std::thread::sleep(Duration::from_secs(2));
 
-        let mouse_hook =
-            SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_ll_proc), std::ptr::null_mut(), 0);
-        let kb_hook = SetWindowsHookExW(
-            WH_KEYBOARD_LL,
-            Some(keyboard_ll_proc),
-            std::ptr::null_mut(),
-            0,
-        );
+        #[cfg(target_os = "windows")]
+        let (mouse_hook, kb_hook) = {
+            let mouse_hook =
+                SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_ll_proc), std::ptr::null_mut(), 0);
+            let kb_hook = SetWindowsHookExW(
+                WH_KEYBOARD_LL,
+                Some(keyboard_ll_proc),
+                std::ptr::null_mut(),
+                0,
+            );
 
-        if !mouse_hook.is_null() && !kb_hook.is_null() {
-            HOOKS_ACTIVE.store(true, Ordering::SeqCst);
-        } else {
-            let err = GetLastError();
-            log::warn!("[Hotkeys] {}", AppError::WindowsSystem(err));
+            if !mouse_hook.is_null() && !kb_hook.is_null() {
+                HOOKS_ACTIVE.store(true, Ordering::SeqCst);
+            } else {
+                let err = GetLastError();
+                log::warn!("[Hotkeys] {}", AppError::WindowsSystem(err));
+            }
+            (mouse_hook, kb_hook)
+        };
+
+        // macOS: a CGEventTap replaces the low-level hooks. It only starts if
+        // the user has granted Accessibility permission; without it we fall
+        // back to polling CGEventSourceKeyState, which only sees keys while the
+        // app is frontmost.
+        #[cfg(target_os = "macos")]
+        {
+            let _ = APP_FOR_CURSOR.set(app.clone());
+            macos_event_tap::start();
+            for _ in 0..100 {
+                if macos_event_tap::ACTIVE.load(Ordering::SeqCst) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            if macos_event_tap::ACTIVE.load(Ordering::SeqCst) {
+                HOOKS_ACTIVE.store(true, Ordering::SeqCst);
+            } else {
+                log::warn!(
+                    "[Hotkeys] CGEventTap inactive - grant Accessibility permission in \
+                     System Settings > Privacy & Security > Accessibility. Falling back to \
+                     foreground-only polling."
+                );
+            }
         }
 
         let state = app.state::<ClickerState>();
@@ -475,12 +611,17 @@ pub fn start_hotkey_listener(app: AppHandle) {
         let mut was_suppressed = false;
         let mut master_was_pressed = false;
         let mut last_check = Instant::now();
+        #[cfg(target_os = "windows")]
         let mut msg: MSG = std::mem::zeroed();
 
+        #[cfg_attr(not(target_os = "windows"), allow(unused_labels))]
         'outer: loop {
-            while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
-                if msg.message == WM_QUIT {
-                    break 'outer;
+            #[cfg(target_os = "windows")]
+            {
+                while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+                    if msg.message == WM_QUIT {
+                        break 'outer;
+                    }
                 }
             }
 
@@ -634,19 +775,30 @@ pub fn start_hotkey_listener(app: AppHandle) {
 
                 was_pressed = currently_pressed;
             } else if HOOKS_ACTIVE.load(Ordering::Relaxed) {
-                if PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_NOREMOVE) == 0 {
-                    WaitMessage();
+                #[cfg(target_os = "windows")]
+                {
+                    if PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_NOREMOVE) == 0 {
+                        WaitMessage();
+                    }
+                }
+                // No message queue to park on; the tap runs on its own runloop.
+                #[cfg(target_os = "macos")]
+                {
+                    std::thread::sleep(POLL_INTERVAL);
                 }
             } else {
                 std::thread::sleep(POLL_INTERVAL);
             }
         }
 
-        if !mouse_hook.is_null() {
-            UnhookWindowsHookEx(mouse_hook);
-        }
-        if !kb_hook.is_null() {
-            UnhookWindowsHookEx(kb_hook);
+        #[cfg(target_os = "windows")]
+        {
+            if !mouse_hook.is_null() {
+                UnhookWindowsHookEx(mouse_hook);
+            }
+            if !kb_hook.is_null() {
+                UnhookWindowsHookEx(kb_hook);
+            }
         }
     });
 }
@@ -662,6 +814,39 @@ fn is_mouse_hotkey_binding(binding: &HotkeyBinding) -> bool {
     binding.main_vks.iter().any(|vk| mouse_vks.contains(vk))
 }
 
+#[cfg(target_os = "macos")]
+static APP_FOR_CURSOR: OnceLock<AppHandle> = OnceLock::new();
+
+/// macOS equivalent of the Win32 WindowFromPoint check: is the pointer inside
+/// one of our own windows? Used to stop a mouse-button hotkey from firing while
+/// the user is clicking the app's own UI.
+#[cfg(target_os = "macos")]
+fn is_cursor_over_own_window() -> bool {
+    let Some(app) = APP_FOR_CURSOR.get() else {
+        return false;
+    };
+    let Some((cx, cy)) = crate::engine::mouse::current_cursor_position() else {
+        return false;
+    };
+    for label in ["main", "overlay"] {
+        let Some(window) = app.get_webview_window(label) else {
+            continue;
+        };
+        if !window.is_visible().unwrap_or(false) {
+            continue;
+        }
+        let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) else {
+            continue;
+        };
+        let (w, h) = (size.width as i32, size.height as i32);
+        if cx >= pos.x && cx < pos.x + w && cy >= pos.y && cy < pos.y + h {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(target_os = "windows")]
 fn is_cursor_over_own_window() -> bool {
     unsafe {
         let mut pt: POINT = std::mem::zeroed();
@@ -941,8 +1126,40 @@ fn modifiers_match(binding: &HotkeyBinding, down: &DownState, strict: bool) -> b
     true
 }
 
+#[cfg(target_os = "windows")]
 pub fn is_vk_down(vk: i32) -> bool {
     unsafe { (GetAsyncKeyState(vk) as u16 & 0x8000) != 0 }
+}
+
+/// Modifier keys emit NX_FLAGSCHANGED rather than key-down/up, so the tap
+/// never sees them; query the HID state directly for those.
+#[cfg(target_os = "macos")]
+fn is_modifier_vk(vk: u16) -> bool {
+    matches!(
+        vk,
+        VK_CONTROL | VK_RCONTROL | VK_MENU | VK_RMENU | VK_SHIFT | VK_RSHIFT | VK_LWIN | VK_RWIN
+    )
+}
+
+#[cfg(target_os = "macos")]
+pub fn is_vk_down(vk: i32) -> bool {
+    match vk as u16 {
+        VK_LBUTTON => macos_event_tap::is_mouse_down(0),
+        VK_RBUTTON => macos_event_tap::is_mouse_down(1),
+        VK_MBUTTON => macos_event_tap::is_mouse_down(2),
+        VK_XBUTTON1 => macos_event_tap::is_mouse_down(3),
+        VK_XBUTTON2 => macos_event_tap::is_mouse_down(4),
+        0xFF => false, // key with no macOS equivalent
+        key => {
+            if is_modifier_vk(key) {
+                unsafe { macos_input::CGEventSourceKeyState(macos_input::HID_SYSTEM_STATE, key) }
+            } else if macos_event_tap::ACTIVE.load(Ordering::SeqCst) {
+                macos_event_tap::is_down(key)
+            } else {
+                unsafe { macos_input::CGEventSourceKeyState(macos_input::HID_SYSTEM_STATE, key) }
+            }
+        }
+    }
 }
 
 fn binding(vk: i32, token: &str) -> (i32, String) {
@@ -1053,6 +1270,24 @@ fn parse_numpad_token(token: &str) -> Option<(i32, String)> {
     }
 }
 
+/// Windows lays F1..F24 out contiguously.
+#[cfg(target_os = "windows")]
+fn function_key_vk(number: i32) -> Option<i32> {
+    Some(VK_F1 as i32 + (number - 1))
+}
+
+/// macOS CGKeyCodes for the function keys are NOT contiguous, so they have to
+/// be looked up. F21-F24 have no macOS equivalent.
+#[cfg(target_os = "macos")]
+fn function_key_vk(number: i32) -> Option<i32> {
+    const FN_KEYS: [u16; 20] = [
+        0x7A, 0x78, 0x63, 0x76, 0x60, 0x61, 0x62, 0x64, 0x65, 0x6D, // F1-F10
+        0x67, 0x6F, 0x69, 0x6B, 0x71, 0x6A, 0x40, 0x4F, 0x50, 0x5A, // F11-F20
+    ];
+    let idx = usize::try_from(number - 1).ok()?;
+    FN_KEYS.get(idx).map(|vk| *vk as i32)
+}
+
 fn parse_function_key_token(token: &str) -> Option<(i32, String)> {
     if !token.starts_with('f') || token.len() > 3 {
         return None;
@@ -1060,7 +1295,7 @@ fn parse_function_key_token(token: &str) -> Option<(i32, String)> {
 
     let number = token[1..].parse::<i32>().ok()?;
     let vk = match number {
-        1..=24 => VK_F1 as i32 + (number - 1),
+        1..=24 => function_key_vk(number)?,
         _ => return None,
     };
 
