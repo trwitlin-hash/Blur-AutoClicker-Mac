@@ -31,20 +31,38 @@ jobs:
 
       - run: npm ci
 
-      # APPLE_SIGNING_IDENTITY is required. Without it Tauri emits a
-      # linker-signed bundle with no sealed resources and silently drops
-      # entitlements.plist, which stops the Accessibility grant from sticking.
-      - name: Build
-        env:
-          APPLE_SIGNING_IDENTITY: "-"
-        run: npm run tauri -- build --target aarch64-apple-darwin
+      # Build the .app only. Signing is done afterwards, because Tauri's
+      # bundler enables hardened runtime when it signs, and a hardened-runtime
+      # binary with only an ad-hoc signature is not trusted for the
+      # Accessibility grant that CGEventPost needs.
+      - name: Build app bundle
+        run: npm run tauri -- build --target aarch64-apple-darwin --bundles app
 
-      - name: Verify the bundle is sealed
+      # Ad-hoc, sealed, no hardened runtime. Without this step Tauri leaves a
+      # linker-signed bundle with no _CodeSignature at all, which also breaks
+      # the grant.
+      - name: Sign
         run: |
           APP=src-tauri/target/aarch64-apple-darwin/release/bundle/macos/BlurAutoClicker.app
+          codesign --force --deep --sign - \
+            --entitlements src-tauri/entitlements.plist "$APP"
           codesign --verify --deep --strict "$APP"
-          codesign -dv --verbose=2 "$APP" 2>&1 | grep -q 'Sealed Resources' \
+          codesign -d --verbose=2 "$APP" 2>&1 | grep -q 'Sealed Resources' \
             || { echo "bundle is not sealed"; exit 1; }
+          codesign -d --verbose=2 "$APP" 2>&1 | grep -q 'flags=0x2(adhoc)' \
+            || { echo "unexpected signature flags (hardened runtime?)"; exit 1; }
+
+      # Assemble the disk image from the signed bundle.
+      - name: Package dmg
+        run: |
+          APP=src-tauri/target/aarch64-apple-darwin/release/bundle/macos/BlurAutoClicker.app
+          VERSION=$(node -p "require('./package.json').version")
+          STAGE=$(mktemp -d)
+          cp -R "$APP" "$STAGE/"
+          ln -s /Applications "$STAGE/Applications"
+          mkdir -p dist-dmg
+          hdiutil create -volname BlurAutoClicker -srcfolder "$STAGE" -ov \
+            -format UDZO "dist-dmg/BlurAutoClicker_${VERSION}_aarch64.dmg"
 
       - name: Publish
         if: startsWith(github.ref, 'refs/tags/')
@@ -54,4 +72,4 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" \
             --title "${GITHUB_REF_NAME} — Apple Silicon" \
             --generate-notes \
-            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+            dist-dmg/*.dmg
