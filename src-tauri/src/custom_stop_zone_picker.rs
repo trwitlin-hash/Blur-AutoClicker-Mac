@@ -291,8 +291,8 @@ mod platform {
     use super::{normalize_rect, picker, StopZoneRect};
     use crate::ClickerState;
 
-    const NX_RMOUSEDOWN: u32 = 4;
-    const NX_RMOUSEUP: u32 = 5;
+    const NX_RMOUSEDOWN: u32 = 3;
+    const NX_RMOUSEUP: u32 = 4;
     const NX_KEYDOWN: u32 = 10;
     const KCG_KEYBOARD_EVENT_KEYCODE: u32 = 9;
     const VK_ESCAPE: u16 = 53;

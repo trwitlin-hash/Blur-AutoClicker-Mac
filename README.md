@@ -7,8 +7,12 @@ tracking upstream **v3.9.6**.
 > BlurAutoClicker. The Windows-only input layer was replaced with a macOS
 > CoreGraphics implementation, and the build was retargeted to
 > `aarch64-apple-darwin`. Modified on **2026-09-05**, based on upstream tag
-> `v3.9.6`. Upstream is unmodified in all other respects, and all Windows code
-> is preserved behind `#[cfg(target_os = "windows")]`.
+> `v3.9.6`.
+>
+> Windows code paths are retained behind `#[cfg(target_os = "windows")]` rather
+> than deleted, but **only the macOS target is built and tested here** — the
+> Windows target is not verified against this tree and may not compile. Use
+> [upstream](https://github.com/Blur009/Blur-AutoClicker) for Windows.
 
 Upstream is Windows-only by design — the author has
 [declined to support macOS](https://github.com/Blur009/Blur-AutoClicker/pull/214)
@@ -50,10 +54,11 @@ remove the stale entry with **−** and re-add it.
 | Settings / stats path | `%APPDATA%` | `~/Library/Application Support/BlurAutoClicker` |
 | Modifier labels | `Ctrl` / `Alt` / `Super` | `⌃` / `⌥` / `⌘` |
 
-Known no-ops on macOS: `disableScreenshots` (relies on `SetWindowDisplayAffinity`),
-Crashpad (no prebuilt macOS artifact), and the auto-updater (upstream publishes no
-macOS artifact, so its check is inert by design rather than offering a Windows
-installer).
+Known no-ops on macOS: `disableScreenshots` (relies on `SetWindowDisplayAffinity`)
+and Crashpad (no prebuilt macOS artifact). The auto-updater is **not registered on
+macOS at all** — upstream's update feed publishes Windows artifacts and is signed
+with upstream's key, so leaving it wired up would both fail and hand a third party
+replace authority over this fork's installs. Update by downloading a new release.
 
 See [PORTING-NOTES.md](PORTING-NOTES.md) for the full method, including the
 three-way merge used and the required post-build re-signing step.
@@ -62,15 +67,17 @@ three-way merge used and the required post-build re-signing step.
 
 ```bash
 npm install
-npm run tauri -- build --target aarch64-apple-darwin
+APPLE_SIGNING_IDENTITY="-" npm run tauri -- build --target aarch64-apple-darwin
 ```
 
-Tauri ad-hoc signs the binary but does not seal the bundle, so re-sign afterwards:
+`APPLE_SIGNING_IDENTITY="-"` matters. Without it Tauri emits a *linker-signed*
+bundle with no `_CodeSignature` and never applies `entitlements.plist`, so
+`codesign --verify` fails and the Accessibility grant will not stick. With it the
+bundle is ad-hoc signed with hardened runtime, sealed resources and the
+entitlements embedded — verify with:
 
 ```bash
-codesign --force --deep --sign - \
-  --entitlements src-tauri/entitlements.plist \
-  /Applications/BlurAutoClicker.app
+codesign --verify --deep --strict src-tauri/target/aarch64-apple-darwin/release/bundle/macos/BlurAutoClicker.app
 ```
 
 ## Credits

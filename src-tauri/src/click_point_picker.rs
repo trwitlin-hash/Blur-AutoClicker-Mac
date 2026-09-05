@@ -324,8 +324,8 @@ mod platform {
     use crate::ClickerState;
 
     // Event types
-    const NX_RMOUSEDOWN: u32 = 4;
-    const NX_RMOUSEUP: u32 = 5;
+    const NX_RMOUSEDOWN: u32 = 3;
+    const NX_RMOUSEUP: u32 = 4;
     const NX_KEYDOWN: u32 = 10;
 
     // Event fields

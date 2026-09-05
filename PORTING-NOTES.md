@@ -53,11 +53,13 @@ than deleted, so the tree can still target Windows.
 
 ## Deliberate differences
 
-- **Auto-update is inert.** Upstream's `latest.json` has no `darwin` platform
-  key, so the updater's `check()` is a clean no-op. The in-app "check for
-  updates" (a plain GitHub API call) still works and will report new releases —
-  but those releases are Windows-only. To move to a newer version, re-run the
-  build script against the new tag.
+- **The updater plugin is not registered on macOS.** Its endpoint and public key
+  belonged to upstream, whose feed ships Windows artifacts; on macOS `check()`
+  returned `Err(TargetsNotFound)` rather than a clean `Ok(None)`, and keeping
+  upstream's pubkey configured would have let that key authorise a replacement of
+  this fork's installs. Both the config and the macOS registration were removed.
+  The in-app "check for updates" (a plain GitHub API call) still reports new
+  upstream releases, but those are Windows-only.
 - **Crash reporting is off.** `crashpad-rs`'s prebuilt artifact has no macOS
   build, so the `crashpad` Cargo feature is no longer on by default.
 - **`disableScreenshots` does nothing.** It relies on
@@ -96,27 +98,20 @@ xattr -cr /Applications/BlurAutoClicker.app
 cd ~/Downloads/BlurAutoClicker-mac/upstream && npm run tauri -- build --target aarch64-apple-darwin
 ```
 
-### Important: re-sign the bundle after every build
+### Sign at build time, not afterwards
 
-Tauri ad-hoc signs the *binary* but does not seal the *bundle* — the built
-`.app` has no `Contents/_CodeSignature`, and `codesign --verify` fails with
-"code has no resources but signature indicates they must be present".
+Build with `APPLE_SIGNING_IDENTITY="-"`. Without it Tauri produces a
+*linker-signed* bundle: no `Contents/_CodeSignature`, `Sealed Resources=none`,
+`codesign --verify` fails, and `bundle.macOS.entitlements` is silently ignored
+because Tauri only applies entitlements when it signs. Since macOS binds the
+Accessibility (TCC) grant to the code signature, shipping that bundle means the
+permission will not stick for anyone who installs it.
 
-Because macOS binds the Accessibility (TCC) grant to the code signature, an
-unsealed bundle can cause the permission to fail to stick. Seal it after each
-build:
+With the identity set, the bundle gets an ad-hoc signature with hardened runtime,
+sealed resources, and the entitlements actually embedded.
 
-```bash
-codesign --force --deep --sign - \
-  --entitlements ~/Downloads/BlurAutoClicker-mac/upstream/src-tauri/entitlements.plist \
-  /Applications/BlurAutoClicker.app
-```
-
-Then confirm: `codesign --verify --deep --strict /Applications/BlurAutoClicker.app`
-should report nothing, and `codesign -dv` should show `Sealed Resources`.
-
-Re-signing changes the cdhash, so after any rebuild remove the old
-Accessibility entry with `-` and re-add it.
+Any rebuild changes the cdhash, so remove the stale Accessibility entry with `-`
+and re-add it after installing a new build.
 
 ## One caveat worth stating plainly
 

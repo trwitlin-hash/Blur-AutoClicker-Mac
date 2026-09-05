@@ -518,6 +518,9 @@ pub fn run() {
             #[cfg(windows)]
             set_app_aumid();
 
+            // No signed macOS update feed exists for this fork, and the
+            // upstream feed publishes Windows artifacts only.
+            #[cfg(target_os = "windows")]
             if !crate::portable::is_portable() {
                 app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
             }
