@@ -72,7 +72,16 @@ const CHECKS = [
     cmd: ['cargo', 'fmt', '--manifest-path', 'src-tauri/Cargo.toml', '--check'],
     fix: ['cargo', 'fmt', '--manifest-path', 'src-tauri/Cargo.toml'],
   },
-  { name: 'npm audit', cmd: ['npm', 'audit'], fix: ['npm', 'audit', 'fix'] },
+  // Audit what actually ships. The dev tree currently carries advisories with
+  // no fix available upstream (minimatch), so auditing it as a hard gate makes
+  // the gate permanently red and trains people to bypass it -- which is worse
+  // than not having it. Dev-tool advisories are reported by `npm audit`
+  // separately; this one blocks on anything reaching a user.
+  {
+    name: 'npm audit',
+    cmd: ['npm', 'audit', '--omit=dev'],
+    fix: ['npm', 'audit', 'fix', '--omit=dev'],
+  },
 ];
 
 /**

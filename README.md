@@ -1,13 +1,13 @@
-# BlurAutoClicker — macOS (Apple Silicon)
+# BlurAutoClicker — macOS
 
 A macOS port of [Blur009/Blur-AutoClicker](https://github.com/Blur009/Blur-AutoClicker),
 tracking upstream **v3.9.6**.
 
 > **Modification notice (GPL-3.0 §5a).** This is a modified version of
 > BlurAutoClicker. The Windows-only input layer was replaced with a macOS
-> CoreGraphics implementation, and the build was retargeted to
-> `aarch64-apple-darwin`. Modified on **2026-09-05**, based on upstream tag
-> `v3.9.6`.
+> CoreGraphics implementation, and the build was retargeted to macOS
+> (`universal-apple-darwin`: Apple Silicon and Intel). Modified on
+> **2026-09-05**, based on upstream tag `v3.9.6`.
 >
 > The Windows implementation has been **removed entirely**, not just gated off:
 > the Win32 input layer, WebView2 bootstrapper, NSIS packaging, PowerShell
@@ -68,20 +68,35 @@ three-way merge used and the required post-build re-signing step.
 
 ## Building
 
+Needs both targets: `rustup target add aarch64-apple-darwin x86_64-apple-darwin`.
+
 ```bash
 npm install
-APPLE_SIGNING_IDENTITY="-" npm run tauri -- build --target aarch64-apple-darwin
+npm run tauri -- build --target universal-apple-darwin --bundles app
+
+APP=src-tauri/target/universal-apple-darwin/release/bundle/macos/BlurAutoClicker.app
+codesign --force --deep --sign - --entitlements src-tauri/entitlements.plist "$APP"
 ```
 
-`APPLE_SIGNING_IDENTITY="-"` matters. Without it Tauri emits a *linker-signed*
-bundle with no `_CodeSignature` and never applies `entitlements.plist`, so
-`codesign --verify` fails and the Accessibility grant will not stick. With it the
-bundle is ad-hoc signed with hardened runtime, sealed resources and the
-entitlements embedded — verify with:
+**Sign separately, and do not let Tauri do it.** Passing
+`APPLE_SIGNING_IDENTITY` makes Tauri's bundler sign *with hardened runtime*, and
+a hardened-runtime binary carrying only an ad-hoc signature has no signing
+authority behind it, so macOS will not extend the Accessibility grant that
+`CGEventPost` needs. Leaving it unset is no better: Tauri then emits a
+linker-signed bundle with no `_CodeSignature` and silently drops
+`entitlements.plist`, which breaks the grant too. Both failures are silent and
+only show up as "clicking does nothing".
+
+Verify all three properties before shipping:
 
 ```bash
-codesign --verify --deep --strict src-tauri/target/aarch64-apple-darwin/release/bundle/macos/BlurAutoClicker.app
+codesign --verify --deep --strict "$APP"
+codesign -d --verbose=2 "$APP" 2>&1 | grep -E 'flags=0x2\(adhoc\)|Sealed Resources'
+lipo -archs "$APP/Contents/MacOS/BlurAutoClicker"   # expect: x86_64 arm64
 ```
+
+Then package the signed bundle (`.github/workflows/release.yml` does exactly
+this, with the checks as hard failures).
 
 ## Credits
 
